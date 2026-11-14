@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build and run docvision-llm-ws locally.
+# Build and run docvisionllm locally.
 #
 #   scripts/run-local.sh            # release build, uses .env (created on first run)
 #   scripts/run-local.sh --mock     # also start the mock LLM provider and point the service at it
 #   scripts/run-local.sh --debug    # debug build (faster to compile), text logs
 #
-# Build output goes to $CARGO_TARGET_DIR (default: ~/.cache/docvision-llm-ws/target) so it stays
+# Build output goes to $CARGO_TARGET_DIR (default: ~/.cache/docvisionllm/target) so it stays
 # out of synced folders. Stop with Ctrl-C (the mock provider is stopped too).
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,15 +22,15 @@ for arg in "$@"; do
 done
 
 command -v cargo >/dev/null || { echo "cargo not found: install Rust from https://rustup.rs" >&2; exit 1; }
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/docvision-llm-ws/target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/.cache/docvisionllm/target}"
 
 [ -f .env ] || ./scripts/setup-env.sh
 
 build_flag=""
 [ "$profile" = release ] && build_flag="--release"
 echo "building ($profile)..."
-cargo build $build_flag --bin docvision-llm-ws
-bin="$CARGO_TARGET_DIR/$profile/docvision-llm-ws"
+cargo build $build_flag --bin docvisionllm
+bin="$CARGO_TARGET_DIR/$profile/docvisionllm"
 
 # Values from .env (real environment variables still win inside the service).
 env_get() { grep -E "^$1=" .env | tail -1 | cut -d= -f2-; }
@@ -59,7 +59,7 @@ fi
 
 cat <<EOF
 
-docvision-llm-ws on http://127.0.0.1:$port  (data: $(env_get DOCVISION_DATA_DIR || true))
+docvisionllm on http://127.0.0.1:$port  (data: $(env_get DOCVISION_DATA_DIR || true))
 Try:
   curl -s localhost:$port/rpc -H "X-ACCESS-TOKEN: $token" -H 'Content-Type: application/json' \\
     -d '{"operation":"convert","payload":{"source":"$PWD/README.md"},"options":{"execution":"sync","summary_method":"local","title_method":"local"}}'

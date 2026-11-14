@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// An extracted image as listed in the result. `path` is relative to the Markdown file.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -38,29 +38,24 @@ impl ImageMeta {
 #[derive(Debug, Clone, Serialize)]
 pub struct Header<'a> {
     pub schema_version: u32,
-    pub request_id: &'a str,
+    pub operation: &'a str,
     pub job_id: Option<&'a str>,
+    pub request_id: &'a str,
     pub status: &'a str,
     pub cache_hit: bool,
     pub src_file: &'a str,
     /// Size of the source document (`null` when it could not be fetched or converted).
     pub src_bytes: Option<u64>,
-    /// The destination as requested (a folder or a `.md` location).
+    /// The destination as requested (a folder or a `.jsonl` location).
     pub dest_file: Option<&'a str>,
-    /// Where the Markdown was written (`null` without a destination), and its size (always set
-    /// for a converted document).
-    pub md_file: Option<&'a str>,
-    pub md_bytes: Option<u64>,
-    /// Where the JSON result was written and its exact size (`null` without a destination).
-    pub docv_file: Option<&'a str>,
-    pub docv_bytes: Option<u64>,
+    /// Where this result was written as JSON Lines (`null` without a destination).
+    pub output_file: Option<&'a str>,
     /// Where extracted images were written (`null` without a destination or without images).
     pub images_dir: Option<&'a str>,
     /// Where the zip is (or will be, via `job.zip`) for an async job; `zip_bytes` is 0 until it
     /// exists.
     pub zip_file: Option<&'a str>,
     pub zip_bytes: u64,
-    pub metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -108,6 +103,18 @@ impl FeatureStatus {
     }
 }
 
+/// What a document is about, for search: written by the LLM with the title and summary.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Search {
+    pub keywords: Vec<String>,
+    pub entities: Vec<String>,
+    pub questions: Vec<String>,
+    pub topics: Vec<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct LanguageDetection {
     pub code: String,
@@ -122,6 +129,8 @@ pub struct Body {
     pub content: String,
     pub title: Option<String>,
     pub summary: Option<String>,
+    /// Terms, entities and questions for finding this document (`gen_search`).
+    pub search: Option<Search>,
     /// Structured data matching `extract_schema` (`None` when not requested or failed).
     pub extracted: Option<serde_json::Value>,
     /// Extracted images (`extract_images`), referenced from `content` as `images/<file>`.
@@ -145,14 +154,15 @@ impl Serialize for Body {
         #[derive(Serialize)]
         struct View<'a> {
             format: Option<Format>,
-            content: &'a str,
             title: &'a Option<String>,
             summary: &'a Option<String>,
-            extracted: &'a Option<serde_json::Value>,
-            images: &'a [ImageMeta],
-            chunks: ChunksSer<'a>,
             language: &'a Option<String>,
             language_detection: &'a Option<LanguageDetection>,
+            search: &'a Option<Search>,
+            content: &'a str,
+            extracted: &'a Option<serde_json::Value>,
+            images: &'a [ImageMeta],
+            chunks: Option<ChunksSer<'a>>,
             translated_content: &'a Option<String>,
             translated_language: &'a Option<String>,
             statistics: &'a Statistics,
@@ -162,14 +172,16 @@ impl Serialize for Body {
         }
         View {
             format: self.format,
-            content: &self.content,
             title: &self.title,
             summary: &self.summary,
-            extracted: &self.extracted,
-            images: &self.images,
-            chunks: ChunksSer { content: &self.content, chunks: &self.chunks },
             language: &self.language,
             language_detection: &self.language_detection,
+            search: &self.search,
+            content: &self.content,
+            extracted: &self.extracted,
+            images: &self.images,
+            // `null` when chunking was off (or produced nothing), so every result has the key.
+            chunks: (!self.chunks.is_empty()).then_some(ChunksSer { content: &self.content, chunks: &self.chunks }),
             translated_content: &self.translated_content,
             translated_language: &self.translated_language,
             statistics: &self.statistics,
@@ -203,9 +215,15 @@ pub struct Timing {
 
 #[derive(Serialize)]
 pub struct Trailer<'a> {
-    pub error: Option<&'a ErrorBody>,
+    pub metadata: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    /// Hash of the source bytes (`b3:<hex>`), to spot changed documents.
+    pub content_hash: Option<&'a str>,
     pub llm: &'a LlmSection,
     pub timing: &'a Timing,
+    /// When a URL source was fetched, and when this result was produced (RFC 3339, UTC).
+    pub fetched_at: Option<&'a str>,
+    pub converted_at: &'a str,
+    pub error: Option<&'a ErrorBody>,
 }
 
 pub enum BodySrc<'a> {
@@ -269,8 +287,9 @@ impl<W: Write> Write for Counting<W> {
     }
 }
 
-/// Serialize a full result; returns the body byte range within the output.
-pub fn write_result<W: Write>(w: W, limit: u64, h: &Header, body: BodySrc, t: &Trailer) -> io::Result<(u64, u64, W)> {
+/// Serialize a full result (`{header fields, body fields, trailer fields}` and a newline);
+/// returns the body byte range within the output. A crawl page uses its own header and trailer.
+pub fn write_result<W: Write>(w: W, limit: u64, h: &impl Serialize, body: BodySrc, t: &impl Serialize) -> io::Result<(u64, u64, W)> {
     let mut c = Counting { inner: w, n: 0, limit };
     c.write_all(b"{")?;
     write_fields(&mut c, h)?;
@@ -283,7 +302,8 @@ pub fn write_result<W: Write>(w: W, limit: u64, h: &Header, body: BodySrc, t: &T
     let end = c.n;
     c.write_all(b",")?;
     write_fields(&mut c, t)?;
-    c.write_all(b"}")?;
+    // One result is one JSON Lines record.
+    c.write_all(b"}\n")?;
     c.flush()?;
     Ok((start, end, c.inner))
 }
@@ -342,8 +362,8 @@ pub enum Dest {
     S3(crate::source::S3Loc, String),
 }
 
-/// A destination is a `.md` file, or a folder (ending in `/`) where the outputs are named after
-/// the source file: `hello.pdf` -> `hello.pdf.md` and `hello.pdf.docv.json`.
+/// A destination is a `.jsonl` file, or a folder (ending in `/`) where the output is named after
+/// the source file: `hello.pdf` -> `hello.pdf.jsonl`.
 pub fn parse_dest(s: &str, source: &str) -> Result<Dest, AppError> {
     let bad = |m: &str| AppError::bad_request("invalid_destination", m.to_string());
     let (loc, query) = if s.starts_with("s3://") { s.split_once('?').map_or((s, None), |(a, q)| (a, Some(q))) } else { (s, None) };
@@ -360,16 +380,14 @@ pub fn parse_dest(s: &str, source: &str) -> Result<Dest, AppError> {
         } else {
             name.to_string()
         };
-        in_folder = format!("{loc}{name}.md{}", query.map(|q| format!("?{q}")).unwrap_or_default());
+        in_folder = format!("{loc}{name}.jsonl{}", query.map(|q| format!("?{q}")).unwrap_or_default());
         in_folder.as_str()
     } else {
         s
     };
     let key_or_path = if s.starts_with("s3://") { s.split('?').next().unwrap_or(s) } else { s };
-    if !key_or_path.ends_with(".md") || key_or_path.ends_with("/.md") {
-        return Err(bad(
-            "destination must be a folder ending in / or name a .md file (the JSON result is written next to it as <name>.docv.json)",
-        ));
+    if !key_or_path.ends_with(".jsonl") || key_or_path.ends_with("/.jsonl") {
+        return Err(bad("destination must be a folder ending in / or name a .jsonl file"));
     }
     if s.starts_with('/') {
         return Ok(Dest::Local(PathBuf::from(s)));
@@ -386,51 +404,26 @@ pub fn parse_dest(s: &str, source: &str) -> Result<Dest, AppError> {
     Err(bad("destination must be an absolute path, file:/// URL or s3:// location"))
 }
 
-/// `report.md` -> `report.docv.json`: where the full JSON result is written.
-pub fn json_sibling(md: &str) -> String {
-    format!("{}.docv.json", md.strip_suffix(".md").unwrap_or(md))
+/// `report.jsonl` -> `report.zip`: where the zip is written.
+pub fn zip_sibling(out: &str) -> String {
+    format!("{}.zip", out.strip_suffix(".jsonl").unwrap_or(out))
 }
 
-/// `report.md` -> `report.zip`: where the zip is written.
-pub fn zip_sibling(md: &str) -> String {
-    format!("{}.zip", md.strip_suffix(".md").unwrap_or(md))
-}
-
-/// What goes into a zip. `name` is the base name used for the files inside (`<name>.md`).
-pub struct ZipParts<'a> {
-    pub name: &'a str,
-    pub content: &'a str,
-    pub summary: Option<&'a str>,
-    /// `(language, translated Markdown)`, written as `<name>.<language>.md`.
-    pub translated: Option<(&'a str, &'a str)>,
-    /// Extracted images: (stored path, file name), written under `images/`.
-    pub images: &'a [(PathBuf, String)],
-}
-
-/// Write the zip atomically (temp + rename) and return its size. Entries are stored without
-/// compression: pictures barely shrink, and the zip stays quick to build. Images are copied
-/// from disk, so the zip is never held in memory. Blocking: call on the CPU lane.
-pub fn write_zip(path: &Path, parts: &ZipParts) -> io::Result<u64> {
+/// Write a zip of the result (`<name>.jsonl`) and its images (`images/…`) atomically and
+/// return its size. Entries are stored without compression (pictures barely shrink); files are
+/// copied from disk, never held in memory. Blocking: call on the CPU lane.
+pub fn write_zip(path: &Path, name: &str, result: &Path, images: &[(PathBuf, String)]) -> io::Result<u64> {
     use zip::write::SimpleFileOptions;
     let tmp = path.with_extension(format!("zip-{}.tmp", uuid::Uuid::now_v7()));
     let res = (|| {
         let f = std::fs::File::create(&tmp)?;
         let mut z = zip::ZipWriter::new(io::BufWriter::with_capacity(64 * 1024, f));
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
-        let text = |z: &mut zip::ZipWriter<_>, name: &str, s: &str| -> io::Result<()> {
-            z.start_file(name, opts).map_err(io::Error::other)?;
-            z.write_all(s.as_bytes())
-        };
-        text(&mut z, &format!("{}.md", parts.name), parts.content)?;
-        if let Some(s) = parts.summary.filter(|s| !s.trim().is_empty()) {
-            text(&mut z, "summary.md", &format!("{}\n", s.trim_end()))?;
-        }
-        if let Some((lang, t)) = parts.translated {
-            text(&mut z, &format!("{}.{lang}.md", parts.name), t)?;
-        }
-        for (src, name) in parts.images {
-            let mut f = std::fs::File::open(src)?;
-            z.start_file(format!("images/{name}"), opts).map_err(io::Error::other)?;
+        let entries = std::iter::once((result.to_path_buf(), format!("{name}.jsonl")))
+            .chain(images.iter().map(|(src, file)| (src.clone(), format!("images/{file}"))));
+        for (src, entry) in entries {
+            let mut f = std::fs::File::open(&src)?;
+            z.start_file(entry, opts).map_err(io::Error::other)?;
             io::copy(&mut f, &mut z)?;
         }
         let w = z.finish().map_err(io::Error::other)?;
@@ -450,62 +443,47 @@ pub fn write_zip(path: &Path, parts: &ZipParts) -> io::Result<u64> {
     }
 }
 
-/// Base name for the files inside a zip: the destination's Markdown name without `.md`, or the
+/// Base name for the result inside a zip: the destination's file name without `.jsonl`, or the
 /// source file name.
 pub fn zip_name(dest: Option<&Dest>, source: &str) -> String {
     let from_dest = dest.and_then(|d| {
         let shown = d.display();
         let base = shown.split('?').next().unwrap_or(&shown).rsplit('/').next()?.to_string();
         let base = percent_encoding::percent_decode_str(&base).decode_utf8_lossy().to_string();
-        base.strip_suffix(".md").map(str::to_string)
+        base.strip_suffix(".jsonl").map(str::to_string)
     });
     let name = from_dest.unwrap_or_else(|| crate::source::file_name(source).trim().to_string());
     if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) { "document".into() } else { name }
 }
 
 impl Dest {
+    /// The `.jsonl` file this destination writes.
     pub fn display(&self) -> String {
         match self {
             Dest::Local(p) => p.display().to_string(),
             Dest::S3(_, s) => s.clone(),
         }
     }
-    /// Where extracted images go: an `images/` folder next to the Markdown.
-    pub fn images_display(&self) -> String {
-        let images_of = |md: &str| match md.rsplit_once('/') {
-            Some((dir, _)) => format!("{dir}/images/"),
-            None => "images/".to_string(),
-        };
+    /// A sibling of the output file (`images/`, `<name>.zip`), keeping an S3 query string.
+    fn sibling(&self, f: impl Fn(&str) -> String) -> String {
         match self {
-            Dest::Local(p) => images_of(&p.display().to_string()),
+            Dest::Local(p) => f(&p.display().to_string()),
             Dest::S3(_, s) => {
                 let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
-                let d = images_of(base);
+                let d = f(base);
                 q.map(|q| format!("{d}?{q}")).unwrap_or(d)
             }
         }
     }
-
-    pub fn zip_display(&self) -> String {
-        match self {
-            Dest::Local(p) => zip_sibling(&p.display().to_string()),
-            Dest::S3(_, s) => {
-                let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
-                let z = zip_sibling(base);
-                q.map(|q| format!("{z}?{q}")).unwrap_or(z)
-            }
-        }
+    /// Where extracted images go: an `images/` folder next to the output file.
+    pub fn images_display(&self) -> String {
+        self.sibling(|out| match out.rsplit_once('/') {
+            Some((dir, _)) => format!("{dir}/images/"),
+            None => "images/".to_string(),
+        })
     }
-
-    pub fn json_display(&self) -> String {
-        match self {
-            Dest::Local(p) => json_sibling(&p.display().to_string()),
-            Dest::S3(_, s) => {
-                let (base, q) = s.split_once('?').map(|(a, b)| (a, Some(b))).unwrap_or((s, None));
-                let j = json_sibling(base);
-                q.map(|q| format!("{j}?{q}")).unwrap_or(j)
-            }
-        }
+    pub fn zip_display(&self) -> String {
+        self.sibling(zip_sibling)
     }
 }
 
@@ -583,34 +561,30 @@ async fn s3_put(loc: &crate::source::S3Loc, key: &str, data: bytes::Bytes, overw
     }
 }
 
-/// Publish the Markdown to the destination and the JSON result next to it. Both are written
-/// before the caller marks completion; any failure is returned, never hidden.
-/// `images`: extracted image files (stored path, file name) copied into `images/` next to the
-/// Markdown. They are named by content hash, so an existing file is already the same image.
-/// `zip`: a built zip, written as `<name>.zip`; with `zip_only` the Markdown and images are not
-/// written separately.
+/// Publish the result (`.jsonl`) and its images (`images/` next to it) to the destination,
+/// plus a built zip (`<name>.zip`). With `zip_only`, only the zip is written. Everything is
+/// written before the caller marks completion; any failure is returned, never hidden.
+/// `images`: (stored path, file name); named by content hash, so an existing file is already
+/// the same image.
 pub async fn publish(
     dest: &Dest,
     result_file: &Path,
-    content: &str,
     overwrite: bool,
     images: &[(PathBuf, String)],
     zip: Option<&Path>,
     zip_only: bool,
 ) -> Result<(), AppError> {
-    let images: &[(PathBuf, String)] = if zip_only { &[] } else { images };
+    if let Some(z) = zip {
+        publish_zip(dest, z, overwrite).await?;
+    }
+    if zip_only {
+        return Ok(());
+    }
     match dest {
         Dest::Local(p) => {
-            let (p, src, md, images) = (p.clone(), result_file.to_path_buf(), content.as_bytes().to_vec(), images.to_vec());
-            let zip = zip.map(Path::to_path_buf);
+            let (p, src, images) = (p.clone(), result_file.to_path_buf(), images.to_vec());
             tokio::task::spawn_blocking(move || {
-                local_put(Some(&src), None, Path::new(&json_sibling(&p.display().to_string())), overwrite)?;
-                if let Some(z) = &zip {
-                    local_put(Some(z), None, Path::new(&zip_sibling(&p.display().to_string())), overwrite)?;
-                }
-                if !zip_only {
-                    local_put(None, Some(&md), &p, overwrite)?;
-                }
+                local_put(Some(&src), None, &p, overwrite)?;
                 if !images.is_empty() {
                     let io = |e: io::Error| {
                         AppError::new(502, "destination_write_failed", format!("cannot write images: {}", e.kind())).stage("storage")
@@ -632,13 +606,7 @@ pub async fn publish(
         #[cfg(feature = "s3")]
         Dest::S3(loc, shown) => {
             let data = tokio::fs::read(result_file).await.map_err(|_| AppError::internal("cannot read result file"))?;
-            s3_put(loc, &json_sibling(&loc.key), data.into(), overwrite, &dest.json_display()).await?;
-            if let Some(z) = zip {
-                publish_zip(dest, z, overwrite).await?;
-            }
-            if !zip_only {
-                s3_put(loc, &loc.key, bytes::Bytes::copy_from_slice(content.as_bytes()), overwrite, shown).await?;
-            }
+            s3_put(loc, &loc.key, data.into(), overwrite, shown).await?;
             let prefix = loc.key.rsplit_once('/').map(|(d, _)| format!("{d}/images/")).unwrap_or_else(|| "images/".into());
             for (src, name) in images {
                 let data = tokio::fs::read(src).await.map_err(|_| AppError::internal("cannot read extracted image"))?;
@@ -681,25 +649,31 @@ mod tests {
         let llm = LlmSection::default();
         let timing = Timing::default();
         let h = Header {
-            schema_version: 1,
-            request_id: "r",
+            schema_version: SCHEMA_VERSION,
+            operation: "convert",
             job_id: Some("j"),
+            request_id: "r",
             status: "completed",
             cache_hit: false,
             src_file: "/a.md",
             src_bytes: Some(4),
             dest_file: None,
-            md_file: None,
-            md_bytes: None,
-            docv_file: None,
-            docv_bytes: None,
+            output_file: None,
             images_dir: None,
             zip_file: None,
             zip_bytes: 0,
-            metadata: None,
         };
-        let t = Trailer { error: None, llm: &llm, timing: &timing };
+        let t = Trailer {
+            metadata: None,
+            content_hash: None,
+            llm: &llm,
+            timing: &timing,
+            fetched_at: None,
+            converted_at: "2026-01-01T00:00:00Z",
+            error: None,
+        };
         let (s, e, out) = write_result(Vec::new(), u64::MAX, &h, BodySrc::Body(&body), &t).unwrap();
+        assert!(out.ends_with(b"}\n") && !out[..out.len() - 1].contains(&b'\n'), "one JSON Lines record");
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["content"], "# Hi\n\ntext\n");
         assert_eq!(v["chunks"][0]["headings"][0], "Hi");
@@ -713,29 +687,31 @@ mod tests {
         assert_eq!(v2["request_id"], "r2");
         assert_eq!(v2["content"], v["content"]);
         assert!(write_result(Vec::new(), 10, &h, BodySrc::Body(&body), &t).is_err());
+        // Without chunks, the key is still there.
+        let (_, _, out3) = write_result(Vec::new(), u64::MAX, &h, BodySrc::Body(&Body::default()), &t).unwrap();
+        let v3: serde_json::Value = serde_json::from_slice(&out3).unwrap();
+        assert!(v3.get("chunks").is_some_and(|c| c.is_null()) && v3.get("search").is_some());
     }
 
     #[test]
-    fn siblings() {
-        assert_eq!(json_sibling("s3/report.md"), "s3/report.docv.json");
-        assert_eq!(json_sibling("/x/a.md"), "/x/a.docv.json");
-        #[cfg(feature = "s3")]
-        {
-            let d = parse_dest("s3://b/k/report.md?region=eu-west-1", "/in/x.pdf").unwrap();
-            assert_eq!(d.json_display(), "s3://b/k/report.docv.json?region=eu-west-1");
-        }
-        assert!(parse_dest("/x/a.txt", "/in/x.pdf").is_err());
+    fn destinations() {
+        assert_eq!(zip_sibling("/x/a.jsonl"), "/x/a.zip");
+        assert!(parse_dest("/x/a.md", "/in/x.pdf").is_err());
         assert!(parse_dest("/x/a.json", "/in/x.pdf").is_err());
-        // Folders: outputs are named after the source file, extension kept.
+        // Folders: the output is named after the source file, extension kept.
         let d = parse_dest("/out/", "/in/hello.pdf").unwrap();
-        assert_eq!((d.display(), d.json_display()), ("/out/hello.pdf.md".into(), "/out/hello.pdf.docv.json".into()));
-        assert_eq!(parse_dest("/out/", "https://x.com/files/Q3%20report.docx?sig=1").unwrap().display(), "/out/Q3 report.docx.md");
-        assert_eq!(parse_dest("/out/", "https://x.com/").unwrap().display(), "/out/document.md");
+        assert_eq!(
+            (d.display(), d.images_display(), d.zip_display()),
+            ("/out/hello.pdf.jsonl".into(), "/out/images/".into(), "/out/hello.pdf.zip".into())
+        );
+        assert_eq!(parse_dest("/out/", "https://x.com/files/Q3%20report.docx?sig=1").unwrap().display(), "/out/Q3 report.docx.jsonl");
+        assert_eq!(parse_dest("/out/", "https://x.com/").unwrap().display(), "/out/document.jsonl");
+        assert_eq!(zip_name(Some(&d), "/in/hello.pdf"), "hello.pdf");
         #[cfg(feature = "s3")]
         {
             let d = parse_dest("s3://b/out/?region=eu-west-1", "s3://in/a b.pdf").unwrap();
-            assert_eq!(d.display(), "s3://b/out/a%20b.pdf.md?region=eu-west-1");
-            assert_eq!(d.json_display(), "s3://b/out/a%20b.pdf.docv.json?region=eu-west-1");
+            assert_eq!(d.display(), "s3://b/out/a%20b.pdf.jsonl?region=eu-west-1");
+            assert_eq!(d.zip_display(), "s3://b/out/a%20b.pdf.zip?region=eu-west-1");
         }
     }
 }

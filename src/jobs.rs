@@ -10,7 +10,7 @@ use crate::gateway::Prio;
 use crate::llm::{Accounting, Endpoint, LlmSection};
 use crate::markdown;
 use crate::result::{self, Body, BodySrc, FeatureStatus, Header, Statistics, Timing, Trailer};
-use crate::rpc::{AppError, CacheMode, ConvertPayload, Execution, Ocr, Options, Priority, ReqCtx, requester_id, typed};
+use crate::rpc::{AppError, CacheMode, ConvertPayload, Execution, Ocr, Options, Priority, Render, ReqCtx, requester_id, typed};
 use crate::source::{self, Format, Source, Staged};
 use axum::body::Body as HttpBody;
 use axum::response::Response;
@@ -82,7 +82,7 @@ impl Jobs {
         }
         let Some(row) = db.get_job(job_id).await? else { return Ok(None) };
         let row = Arc::new(JobRow { secrets: None, ..row });
-        if matches!(row.state.as_str(), "completed" | "partial" | "failed") && !self.watchers.contains_key(job_id) {
+        if is_terminal(&row.state) && !self.watchers.contains_key(job_id) {
             if self.terminal.len() >= TERMINAL_CACHE_MAX {
                 self.terminal.clear();
             }
@@ -90,6 +90,11 @@ impl Jobs {
         }
         Ok(Some(row))
     }
+}
+
+/// A job is done: `completed`, `partial` or `failed`, or (crawls) `limit_reached` or `cancelled`.
+pub fn is_terminal(state: &str) -> bool {
+    matches!(state, "completed" | "partial" | "failed" | "limit_reached" | "cancelled")
 }
 
 /// Body of a result: produced here, or a byte range copied from a cached result file.
@@ -100,17 +105,17 @@ pub enum BodyRef {
 }
 
 impl BodyRef {
-    fn src(&self) -> BodySrc<'_> {
+    pub fn src(&self) -> BodySrc<'_> {
         match self {
             BodyRef::Owned(b) => BodySrc::Body(b),
             BodyRef::Raw(r) => BodySrc::Raw(r),
         }
     }
-    fn partial(&self) -> bool {
+    pub fn partial(&self) -> bool {
         matches!(self, BodyRef::Owned(b) if b.partial)
     }
     /// Selected fields of the body (parses a raw fragment when needed).
-    fn fields(&self, names: &[&str]) -> serde_json::Map<String, Value> {
+    pub fn fields(&self, names: &[&str]) -> serde_json::Map<String, Value> {
         let v = match self {
             BodyRef::Owned(b) => serde_json::to_value(&**b).unwrap_or(Value::Null),
             BodyRef::Raw(r) => {
@@ -139,12 +144,14 @@ pub struct Converted {
     pub leader: bool,
     pub cache_key: Option<String>,
     pub fetch_ms: u64,
-    /// Size of the fetched source document.
+    /// Size and hash (`b3:<hex>`) of the fetched source, and when a URL source was fetched.
     pub src_bytes: Option<u64>,
+    pub content_hash: Option<String>,
+    pub fetched_at: Option<i64>,
 }
 
 /// The extracted images listed in a converted body.
-fn image_metas(body: &BodyRef) -> Vec<result::ImageMeta> {
+pub fn image_metas(body: &BodyRef) -> Vec<result::ImageMeta> {
     match body {
         BodyRef::Owned(b) => b.images.clone(),
         raw => raw.fields(&["images"]).remove("images").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default(),
@@ -160,12 +167,17 @@ fn cached_images_present(app: &App, raw: &Arc<Vec<u8>>) -> bool {
     })
 }
 
-/// Size of the converted Markdown (`None` when there is no converted body).
-fn md_bytes(body: Option<&BodyRef>) -> Option<u64> {
+/// Length of the converted Markdown (`None` when there is no converted body).
+fn content_len(body: Option<&BodyRef>) -> Option<u64> {
     match body? {
         BodyRef::Owned(b) => Some(b.content.len() as u64),
         raw => raw.fields(&["statistics"]).get("statistics")?.get("content_bytes")?.as_u64(),
     }
+}
+
+/// The image files a result refers to: (stored path, file name).
+fn image_files(app: &App, metas: &[result::ImageMeta]) -> Vec<(PathBuf, String)> {
+    metas.iter().map(|m| (app.images_dir().join(m.file_name()), m.file_name().to_string())).collect()
 }
 
 // ---------------------------------------------------------------- zip
@@ -209,7 +221,7 @@ async fn write_zip_info(app: &App, job_id: &str, info: &ZipInfo) {
     };
     if !ok {
         let _ = tokio::fs::remove_file(&tmp).await;
-        tracing::warn!(target: "docvision_llm_ws::jobs", job_id, "could not record zip state");
+        tracing::warn!(target: "docvisionllm::jobs", job_id, "could not record zip state");
     }
 }
 
@@ -218,36 +230,15 @@ async fn read_zip_info(app: &App, job_id: &str) -> Option<ZipInfo> {
     serde_json::from_slice(&b).ok()
 }
 
-/// Build a zip from result fields (`content`, `summary`, `translated_content`,
-/// `translated_language`). Returns the built file and its size.
+/// Zip a stored result (`<name>.jsonl`) with its images. Returns the built file and its size.
 async fn write_zip_from(
     app: &App,
     out: PathBuf,
     name: String,
-    mut m: serde_json::Map<String, Value>,
+    result: PathBuf,
     images: Vec<(PathBuf, String)>,
 ) -> Result<(PathBuf, u64), AppError> {
-    let r = app
-        .cpu
-        .run(move || {
-            let text = |m: &mut serde_json::Map<String, Value>, k: &str| match m.remove(k) {
-                Some(Value::String(s)) => Some(s),
-                _ => None,
-            };
-            let content = text(&mut m, "content").unwrap_or_default();
-            let summary = text(&mut m, "summary");
-            let (tc, tl) = (text(&mut m, "translated_content"), text(&mut m, "translated_language"));
-            let parts = result::ZipParts {
-                name: &name,
-                content: &content,
-                summary: summary.as_deref(),
-                translated: tl.as_deref().zip(tc.as_deref()),
-                images: &images,
-            };
-            result::write_zip(&out, &parts).map(|n| (out, n))
-        })
-        .await
-        .map_err(cpu_err)?;
+    let r = app.cpu.run(move || result::write_zip(&out, &name, &result, &images).map(|n| (out, n))).await.map_err(cpu_err)?;
     r.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::new(410, "images_expired", "an extracted image is no longer stored; convert the document again").stage("storage")
@@ -255,35 +246,6 @@ async fn write_zip_from(
             AppError::internal(format!("cannot write zip: {}", e.kind())).stage("storage")
         }
     })
-}
-
-const ZIP_FIELDS: [&str; 4] = ["content", "summary", "translated_content", "translated_language"];
-
-/// Build the zip for a conversion that just finished.
-async fn build_zip(
-    app: &App,
-    job_id: &str,
-    source: &str,
-    dest: Option<&result::Dest>,
-    body: &BodyRef,
-    images: &[(PathBuf, String)],
-) -> Result<(PathBuf, u64), AppError> {
-    let m = match body {
-        BodyRef::Owned(b) => {
-            let mut m = serde_json::Map::new();
-            m.insert("content".into(), b.content.clone().into());
-            for (k, v) in
-                [("summary", &b.summary), ("translated_content", &b.translated_content), ("translated_language", &b.translated_language)]
-            {
-                if let Some(v) = v {
-                    m.insert(k.into(), v.clone().into());
-                }
-            }
-            m
-        }
-        raw => raw.fields(&ZIP_FIELDS),
-    };
-    write_zip_from(app, zip_location(app, job_id, dest).0, result::zip_name(dest, source), m, images.to_vec()).await
 }
 
 // ---------------------------------------------------------------- helpers
@@ -427,7 +389,7 @@ fn limits(app: &App, opts: &Options) -> extract::Limits {
     }
 }
 
-fn cpu_err(e: crate::cpu::CpuError) -> AppError {
+pub fn cpu_err(e: crate::cpu::CpuError) -> AppError {
     match e {
         crate::cpu::CpuError::Panicked(m) => {
             AppError::new(422, "corrupt_document", format!("document could not be parsed ({})", m.chars().take(120).collect::<String>()))
@@ -437,7 +399,7 @@ fn cpu_err(e: crate::cpu::CpuError) -> AppError {
     }
 }
 
-fn db_err(_: sqlx::Error) -> AppError {
+pub fn db_err(_: sqlx::Error) -> AppError {
     AppError::new(503, "db_unavailable", "database unavailable").retry_after(5)
 }
 
@@ -447,6 +409,13 @@ pub async fn convert(app: &Arc<App>, ctx: &ReqCtx, payload: Value, options: Valu
     let payload: ConvertPayload = typed(payload, "payload")?;
     let opts: Options = typed(options, "options")?;
     opts.validate()?;
+    if opts.has_crawl_options() || payload.site.is_some() {
+        return Err(AppError::bad_request(
+            "invalid_options",
+            "max_pages, max_depth, same_site, include, exclude, use_sitemap, respect_robots and site are for crawl",
+        ));
+    }
+    check_fetch(app, &payload, &opts)?;
     let sync = opts.execution == Execution::Sync;
     if sync && (payload.destination.is_some() || !payload.webhooks().is_empty()) {
         return Err(AppError::bad_request("invalid_options", "destinations and webhooks require async execution"));
@@ -474,6 +443,20 @@ pub async fn convert(app: &Arc<App>, ctx: &ReqCtx, payload: Value, options: Valu
         enrich_deadline: None,
     });
     if sync { run_sync(app, ctx, spec, src).await } else { accept_async(app, ctx, spec, src).await }
+}
+
+/// Checks shared by `convert` and `crawl`: `payload.request` and rendering.
+pub fn check_fetch(app: &App, payload: &ConvertPayload, opts: &Options) -> Result<(), AppError> {
+    if let Some(r) = &payload.request {
+        if !(payload.source.starts_with("https://") || payload.source.starts_with("http://")) {
+            return Err(AppError::bad_request("invalid_request", "payload.request is only for http(s) sources"));
+        }
+        r.validate()?;
+    }
+    if opts.render == Render::On && app.browser.is_none() {
+        return Err(AppError::bad_request("feature_not_configured", "render=on needs the browser container (DOCVISION_BROWSER_URL)"));
+    }
+    Ok(())
 }
 
 fn request_row(spec: &JobSpec, mode: &str, status: &str, job_id: Option<String>) -> RequestRow {
@@ -583,7 +566,7 @@ async fn async_cache_hit(
     src: &Source,
     job_id: &str,
 ) -> Result<Option<Response>, AppError> {
-    let fctx = source::FetchCtx { http: source::http_client(), staging: &app.staging_dir(), max_bytes: app.cfg.max_input_bytes };
+    let fctx = source::FetchCtx { staging: &app.staging_dir(), max_bytes: app.cfg.max_input_bytes, request: None };
     let staged = source::fetch(&fctx, src).await?;
     let ep = endpoint(app, &spec.options, false)?;
     let (p, m) = ep.as_ref().map(|e| (e.provider.as_str(), e.model.as_str())).unwrap_or(("none", "none"));
@@ -632,6 +615,8 @@ async fn async_cache_hit(
         cache_key: Some(key),
         fetch_ms: 0,
         src_bytes: Some(staged.size),
+        content_hash: Some(format!("b3:{}", staged.hash.to_hex())),
+        fetched_at: None,
     };
     let acct = Arc::new(Accounting::new(spec.request_id.clone(), Some(app.writer.clone())));
     app.metrics.job_state(None, "running");
@@ -683,37 +668,43 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
     }
     .await;
     let timing_base = (0u64, started);
-    let (status, body, err, fetch_ms, cache_hit, src_bytes) = match res {
+    let (status, body, err, fetch_ms, cache_hit, src_bytes, content_hash, fetched_at) = match res {
         Ok(c) => {
             let st = if c.body.partial() { "partial" } else { "completed" };
-            (st, Some(c.body), None, c.fetch_ms, c.cache_hit, c.src_bytes)
+            (st, Some(c.body), None, c.fetch_ms, c.cache_hit, c.src_bytes, c.content_hash, c.fetched_at)
         }
-        Err(e) => ("failed", None, Some(e), 0, false, None),
+        Err(e) => ("failed", None, Some(e), 0, false, None, None, None),
     };
     let timing = timing_for(&acct, body.as_ref(), fetch_ms, timing_base.0, timing_base.1, 0);
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
     let src_shown = source::sanitize(&spec.payload.source);
     let header = Header {
         schema_version: result::SCHEMA_VERSION,
-        request_id: &spec.request_id,
+        operation: "convert",
         job_id: None,
+        request_id: &spec.request_id,
         status,
         cache_hit,
         src_file: &src_shown,
         src_bytes,
         dest_file: None,
-        md_file: None,
-        md_bytes: md_bytes(body.as_ref()),
-        docv_file: None,
-        docv_bytes: None,
+        output_file: None,
         images_dir: None,
         zip_file: None,
         zip_bytes: 0,
-        metadata: spec.payload.metadata.as_ref(),
     };
     let empty = Body::default();
     let err_body = err.as_ref().map(|e| e.body());
-    let trailer = Trailer { error: err_body.as_ref(), llm: &llm, timing: &timing };
+    let (fetched_s, converted_s) = (fetched_at.map(rfc3339), rfc3339(now_ms()));
+    let trailer = Trailer {
+        metadata: spec.payload.metadata.as_ref(),
+        content_hash: content_hash.as_deref(),
+        llm: &llm,
+        timing: &timing,
+        fetched_at: fetched_s.as_deref(),
+        converted_at: &converted_s,
+        error: err_body.as_ref(),
+    };
     let bsrc = body.as_ref().map(|b| b.src()).unwrap_or(BodySrc::Body(&empty));
     let bytes = result::result_bytes(app.cfg.max_result_bytes, &header, bsrc, &trailer);
     log.done = true;
@@ -728,10 +719,7 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
             http_status: Some(http as i64),
             finished_at: now_ms(),
             timings: serde_json::to_string(&timing).ok(),
-            statistics: stats_with_format(
-                &stats,
-                serde_json::json!({"src_bytes": src_bytes, "md_bytes": md_bytes(body.as_ref()), "cache_hit": cache_hit}),
-            ),
+            statistics: stats_with_format(&stats, serde_json::json!({"src_bytes": src_bytes, "cache_hit": cache_hit})),
             format: stats.get("format").and_then(Value::as_str).map(str::to_string),
             usage: serde_json::to_string(&llm.totals).ok(),
             warnings: stats.get("warnings").map(Value::to_string),
@@ -871,23 +859,84 @@ async fn pipeline(
     wait_mem: bool,
 ) -> Result<Converted, AppError> {
     let t = Instant::now();
-    let fctx = source::FetchCtx { http: source::http_client(), staging: &app.staging_dir(), max_bytes: app.cfg.max_input_bytes };
-    let staged = source::fetch(&fctx, src).await?;
-    let fetch_ms = t.elapsed().as_millis() as u64;
-    app.metrics.bytes_fetched.fetch_add(staged.size, std::sync::atomic::Ordering::Relaxed);
     let name = source::file_name(&spec.payload.source);
-    let (path, n2) = (staged.path.clone(), name.clone());
+    let (staged, format) = fetch_source(app, &spec.options, spec.payload.request.as_ref(), src, &name).await?;
+    let fetch_ms = t.elapsed().as_millis() as u64;
+    convert_staged(app, spec, staged, format, name, fetch_ms, prio, enrich_prio, mem, acct, wait_mem).await
+}
+
+/// Fetch a source and sniff its format. A web page is rendered in the browser container when
+/// `render` is `on`, or when it is `auto` and the page looks empty without JavaScript.
+pub async fn fetch_source(
+    app: &App,
+    opts: &Options,
+    request: Option<&source::FetchRequest>,
+    src: &Source,
+    name: &str,
+) -> Result<(Staged, Format), AppError> {
+    let fctx = source::FetchCtx { staging: &app.staging_dir(), max_bytes: app.cfg.max_input_bytes, request };
+    let staged = source::fetch(&fctx, src).await?;
+    app.metrics.bytes_fetched.fetch_add(staged.size, std::sync::atomic::Ordering::Relaxed);
+    let (path, n2) = (staged.path.clone(), name.to_string());
     let format = app.cpu.run(move || source::sniff(&path, &n2)).await.map_err(cpu_err)??;
+    if let (Format::Html, Source::Https(u), Some(b)) = (format, src, &app.browser) {
+        let render = match opts.render {
+            Render::Off => false,
+            Render::On => true,
+            Render::Auto => {
+                let path = staged.path.clone();
+                app.cpu.run(move || std::fs::read_to_string(path).is_ok_and(|h| crate::browser::looks_empty(&h))).await.unwrap_or(false)
+            }
+        };
+        if render {
+            let page = b
+                .render(staged.final_url.as_ref().unwrap_or(u), request, opts.wait_for.as_deref(), opts.wait_ms, app.cfg.max_input_bytes)
+                .await?;
+            let bytes = bytes::Bytes::from(page.html.into_bytes());
+            let mut r = source::stream_to_staging(&fctx, futures_util::stream::iter([Ok(bytes)])).await?;
+            r.final_url = Some(page.url);
+            r.fetched_at = staged.fetched_at;
+            return Ok((r, Format::Html));
+        }
+    }
+    Ok((staged, format))
+}
+
+/// Convert a fetched source: cache lookup, single-flight, extraction and enrichment.
+#[allow(clippy::too_many_arguments)]
+pub async fn convert_staged(
+    app: &Arc<App>,
+    spec: &Arc<JobSpec>,
+    staged: Staged,
+    format: Format,
+    name: String,
+    fetch_ms: u64,
+    prio: Prio,
+    enrich_prio: Prio,
+    mem: &mut crate::admission::MemPermit,
+    acct: Arc<Accounting>,
+    wait_mem: bool,
+) -> Result<Converted, AppError> {
     app.admission.adjust(mem, app.admission.estimate(Some(staged.size), Some(format)), wait_mem).await?;
     let opts = &spec.options;
     let ep = endpoint(app, opts, needs_llm_extract(spec, Some(format)))?;
     let (p, m) = ep.as_ref().map(|e| (e.provider.clone(), e.model.clone())).unwrap_or(("none".into(), "none".into()));
     let key = cache::key(&staged.hash, opts, &p, &m);
-    let src_bytes = Some(staged.size);
+    let (src_bytes, content_hash, fetched_at) = (Some(staged.size), Some(format!("b3:{}", staged.hash.to_hex())), staged.fetched_at);
+    let done = |body, cache_hit, leader, cache_key| Converted {
+        body,
+        cache_hit,
+        leader,
+        cache_key,
+        fetch_ms,
+        src_bytes,
+        content_hash: content_hash.clone(),
+        fetched_at,
+    };
     if opts.cache == CacheMode::Use {
         if let Some(raw) = cache_lookup(app, &key).await.filter(|raw| cached_images_present(app, raw)) {
             app.metrics.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return Ok(Converted { body: BodyRef::Raw(raw), cache_hit: true, leader: false, cache_key: Some(key), fetch_ms, src_bytes });
+            return Ok(done(BodyRef::Raw(raw), true, false, Some(key)));
         }
         app.metrics.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -897,14 +946,14 @@ async fn pipeline(
     };
     if opts.cache == CacheMode::Bypass {
         let body = make().await?;
-        return Ok(Converted { body: BodyRef::Owned(body), cache_hit: false, leader: true, cache_key: None, fetch_ms, src_bytes });
+        return Ok(done(BodyRef::Owned(body), false, true, None));
     }
     let (leader, fut) = app.cache.flight(&key, make);
     if !leader {
         app.metrics.singleflight_joins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     let body = fut.await?;
-    Ok(Converted { body: BodyRef::Owned(body), cache_hit: !leader, leader, cache_key: Some(key), fetch_ms, src_bytes })
+    Ok(done(BodyRef::Owned(body), !leader, leader, Some(key)))
 }
 
 /// Live stage of an async job, shown by `history.list` while it runs.
@@ -1069,7 +1118,7 @@ async fn finalize_async(
     let dest = spec.payload.destination.as_deref().and_then(|d| result::parse_dest(d, &spec.payload.source).ok());
     let path = app.results_dir().join(format!("{job_id}.json"));
     let src_shown = source::sanitize(&spec.payload.source);
-    let (mut status, body, mut err, fetch_ms, cache_hit, leader, key, src_bytes) = match res {
+    let (mut status, body, mut err, fetch_ms, cache_hit, leader, key, src_bytes, content_hash, fetched_at) = match res {
         Ok(c) => (
             if c.body.partial() { "partial" } else { "completed" },
             Some(c.body),
@@ -1079,51 +1128,27 @@ async fn finalize_async(
             c.leader,
             c.cache_key,
             c.src_bytes,
+            c.content_hash,
+            c.fetched_at,
         ),
-        Err(e) => ("failed", None, Some(e), 0, false, false, None, None),
+        Err(e) => ("failed", None, Some(e), 0, false, false, None, None, None, None),
     };
-    let md_size = md_bytes(body.as_ref());
-    // Extracted images this result refers to (copied next to the Markdown when published).
-    let image_files: Vec<(std::path::PathBuf, String)> = body
-        .as_ref()
-        .map(image_metas)
-        .unwrap_or_default()
-        .iter()
-        .map(|m| (app.images_dir().join(m.file_name()), m.file_name().to_string()))
-        .collect();
+    let content_len = content_len(body.as_ref());
+    // Extracted images this result refers to (copied next to the output when published).
+    let image_files = body.as_ref().map(|b| image_files(app, &image_metas(b))).unwrap_or_default();
     let zip_only = spec.options.zip_only && dest.is_some();
+    let output_shown = dest.as_ref().filter(|_| !zip_only).map(|d| d.display());
     let images_shown = dest.as_ref().filter(|_| !image_files.is_empty() && !zip_only).map(|d| d.images_display());
     let zip_shown = zip_location(app, &job_id, dest.as_ref()).1;
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
     let empty = Arc::new(Body::default());
     let body_ref = body.clone().unwrap_or(BodyRef::Owned(empty));
     let t_store = Instant::now();
-    let content_for_md = || -> Option<String> {
-        dest.as_ref()?;
-        match &body_ref {
-            BodyRef::Owned(b) => Some(b.content.clone()),
-            BodyRef::Raw(_) => body_ref.fields(&["content"]).get("content").and_then(Value::as_str).map(str::to_string),
-        }
-    };
-    let md = if err.is_none() { content_for_md() } else { None };
-
-    // The zip is built before the result is written, so the result can carry its size.
-    let mut zip_built: Option<(PathBuf, u64)> = None;
-    if err.is_none() && spec.options.wants_zip() {
-        match build_zip(app, &job_id, &spec.payload.source, dest.as_ref(), &body_ref, &image_files).await {
-            Ok(z) => zip_built = Some(z),
-            Err(e) => {
-                status = "failed";
-                err = Some(e);
-            }
-        }
-    }
-    let zip_size = zip_built.as_ref().map_or(0, |z| z.1);
-
-    // Timing is fixed once so repeated writes (self-referential sizes) are byte-stable.
     let fixed_timing = timing_for(acct, body.as_ref(), fetch_ms, queue_ms, started, 0);
-    // `published`: where the Markdown and JSON go, plus the JSON's size (it contains itself).
-    let write = |status: &'static str, published: Option<(String, String, u64)>, err: Option<&AppError>| {
+    let (fetched_s, converted_s) = (fetched_at.map(rfc3339), rfc3339(now_ms()));
+
+    // `published`: the destination gets this result (paths are shown only then).
+    let write = |status: &'static str, published: bool, zip_bytes: u64, err: Option<&AppError>| {
         let (app2, path2, body2, llm2, spec2, src2) =
             (app.clone(), path.clone(), body_ref.clone(), llm.clone(), spec.clone(), src_shown.clone());
         let mut timing = fixed_timing.clone();
@@ -1131,9 +1156,8 @@ async fn finalize_async(
             timing.stages.storage_ms = t_store.elapsed().as_millis() as u64;
         }
         let dest_s = spec.payload.destination.as_deref().map(source::sanitize);
-        let images_s = images_shown.clone();
-        let zip_s = zip_shown.clone();
-        let err_none = err.is_none();
+        let (out_s, images_s, zip_s) = (output_shown.clone(), images_shown.clone(), zip_shown.clone());
+        let (hash, fetched, converted) = (content_hash.clone(), fetched_s.clone(), converted_s.clone());
         let eb = err.map(|e| e.body());
         let cpu = app2.cpu.clone();
         async move {
@@ -1141,23 +1165,28 @@ async fn finalize_async(
                 .run(move || {
                     let h = Header {
                         schema_version: result::SCHEMA_VERSION,
-                        request_id: &spec2.request_id,
+                        operation: "convert",
                         job_id: spec2.job_id.as_deref(),
+                        request_id: &spec2.request_id,
                         status,
                         cache_hit,
                         src_file: &src2,
                         src_bytes,
                         dest_file: dest_s.as_deref(),
-                        md_file: published.as_ref().map(|p| p.0.as_str()),
-                        md_bytes: if zip_only && published.is_some() { Some(0) } else { md_size },
-                        docv_file: published.as_ref().map(|p| p.1.as_str()),
-                        docv_bytes: published.as_ref().map(|p| p.2),
-                        images_dir: published.as_ref().and(images_s.as_deref()),
+                        output_file: out_s.as_deref().filter(|_| published),
+                        images_dir: images_s.as_deref().filter(|_| published),
                         zip_file: zip_s.as_deref(),
-                        zip_bytes: if err_none { zip_size } else { 0 },
-                        metadata: spec2.payload.metadata.as_ref(),
+                        zip_bytes,
                     };
-                    let t = Trailer { error: eb.as_ref(), llm: &llm2, timing: &timing };
+                    let t = Trailer {
+                        metadata: spec2.payload.metadata.as_ref(),
+                        content_hash: hash.as_deref(),
+                        llm: &llm2,
+                        timing: &timing,
+                        fetched_at: fetched.as_deref(),
+                        converted_at: &converted,
+                        error: eb.as_ref(),
+                    };
                     result::write_file_atomic(&path2, app2.cfg.max_result_bytes, &h, body2.src(), &t).map(|r| (r, timing))
                 })
                 .await;
@@ -1169,47 +1198,40 @@ async fn finalize_async(
         }
     };
 
-    // The published JSON is byte-identical to the local result file.
-    let mut written = match (&dest, err.is_none()) {
-        (Some(d), true) => {
-            // `docv_bytes` is self-referential: rewrite until the digit count is stable.
-            let mut docv_size = 0u64;
-            let mut out = write(status, Some((d.display(), d.json_display(), docv_size)), None).await;
-            for _ in 0..3 {
-                match &out {
-                    Ok(((_, _, size), _)) if docv_size != *size => {
-                        docv_size = *size;
-                        out = write(status, Some((d.display(), d.json_display(), docv_size)), None).await;
-                    }
-                    _ => break,
-                }
+    // The published `.jsonl` is byte-identical to the local result file.
+    let publishing = dest.is_some() && err.is_none();
+    let mut written = write(status, publishing, 0, err.as_ref()).await;
+    // The zip holds the result as written; the result is then rewritten with the zip's size.
+    let mut zip_built: Option<(PathBuf, u64)> = None;
+    if err.is_none() && written.is_ok() && spec.options.wants_zip() {
+        let name = result::zip_name(dest.as_ref(), &spec.payload.source);
+        match write_zip_from(app, zip_location(app, &job_id, dest.as_ref()).0, name, path.clone(), image_files.clone()).await {
+            Ok(z) => {
+                written = write(status, publishing, z.1, None).await;
+                zip_built = Some(z);
             }
-            out
+            Err(e) => {
+                status = "failed";
+                written = write(status, false, 0, Some(&e)).await;
+                err = Some(e);
+            }
         }
-        _ => write(status, None, err.as_ref()).await,
-    };
+    }
+    let zip_size = zip_built.as_ref().map_or(0, |z| z.1);
     if let (Ok(_), Some(d)) = (&written, &dest)
         && err.is_none()
-        && let Err(e) = result::publish(
-            d,
-            &path,
-            md.as_deref().unwrap_or(""),
-            spec.options.overwrite,
-            &image_files,
-            zip_built.as_ref().map(|z| z.0.as_path()),
-            zip_only,
-        )
-        .await
+        && let Err(e) =
+            result::publish(d, &path, spec.options.overwrite, &image_files, zip_built.as_ref().map(|z| z.0.as_path()), zip_only).await
     {
         // Never claim a destination was written when storage failed.
         status = "failed";
-        written = write(status, None, Some(&e)).await;
+        written = write(status, false, 0, Some(&e)).await;
         err = Some(e);
     }
     if let Err(e) = &written {
         status = "failed";
         err = Some(e.clone());
-        let _ = write(status, None, Some(e)).await;
+        let _ = write(status, false, 0, Some(e)).await;
     }
     let ((bs, be, size), timing) = written.unwrap_or(((0, 0, 0), Timing::default()));
     let zip_size = if err.is_none() { zip_size } else { 0 };
@@ -1226,7 +1248,7 @@ async fn finalize_async(
     if status != "failed"
         && leader
         && spec.options.cache != CacheMode::Bypass
-        && md_size.is_some_and(|n| n > 0)
+        && content_len.is_some_and(|n| n > 0)
         && let Some(k) = &key
     {
         app.writer.send(WriteOp::CachePut {
@@ -1244,10 +1266,8 @@ async fn finalize_async(
         "cache_hit": cache_hit,
         "src_bytes": src_bytes,
         "dest_file": spec.payload.destination.as_deref().map(source::sanitize),
-        "md_file": published.map(|d| d.display()),
-        "md_bytes": if zip_only && published.is_some() { Some(0) } else { md_size },
-        "docv_file": published.map(|d| d.json_display()),
-        "docv_bytes": published.map(|_| size),
+        "output_file": published.and(output_shown.as_ref()),
+        "output_bytes": published.and(output_shown.as_ref()).map(|_| size),
         "zip_file": zip_shown,
         "zip_bytes": zip_size,
     });
@@ -1279,7 +1299,7 @@ async fn finalize_async(
         }),
     ];
     if !app.writer.send_durable(terminal).await {
-        tracing::error!(target: "docvision_llm_ws::jobs", job_id = %job_id, fallback = true, "terminal state could not be persisted");
+        tracing::error!(target: "docvisionllm::jobs", job_id = %job_id, fallback = true, "terminal state could not be persisted");
     }
     app.jobs.finish(&job_id, status);
     app.metrics.job_state(Some("running"), status);
@@ -1318,7 +1338,7 @@ pub async fn recover(app: &Arc<App>) -> Result<(), sqlx::Error> {
     let running = app.db.jobs_in_state("running").await?;
     app.writer.send_durable(vec![WriteOp::Recover { at: now_ms() }]).await;
     if !running.is_empty() {
-        tracing::warn!(target: "docvision_llm_ws::jobs", count = running.len(), "marked interrupted running jobs as failed");
+        tracing::warn!(target: "docvisionllm::jobs", count = running.len(), "marked interrupted running jobs as failed");
     }
     let queued = app.db.jobs_in_state("queued").await?;
     let n = queued.len();
@@ -1326,7 +1346,7 @@ pub async fn recover(app: &Arc<App>) -> Result<(), sqlx::Error> {
     tokio::spawn(async move {
         for row in queued {
             let Some(stored) = stored_job(&app2, &row) else {
-                tracing::error!(target: "docvision_llm_ws::jobs", job_id = %row.job_id, "cannot decrypt queued job; marking failed");
+                tracing::error!(target: "docvisionllm::jobs", job_id = %row.job_id, "cannot decrypt queued job; marking failed");
                 app2.writer.send(WriteOp::JobFinished {
                     job_id: row.job_id.clone(),
                     state: "failed".into(),
@@ -1358,7 +1378,7 @@ pub async fn recover(app: &Arc<App>) -> Result<(), sqlx::Error> {
         }
     });
     if n > 0 {
-        tracing::info!(target: "docvision_llm_ws::jobs", count = n, "re-enqueued queued jobs");
+        tracing::info!(target: "docvisionllm::jobs", count = n, "re-enqueued queued jobs");
     }
     #[cfg(feature = "webhooks")]
     crate::webhook::resume(app).await;
@@ -1392,6 +1412,11 @@ async fn job_info(app: &App, row: &JobRow) -> serde_json::Map<String, Value> {
     // Zip state (`job.zip` or `create_zip`); `null` when no zip was asked for.
     let zip = read_zip_info(app, &row.job_id).await;
     m.insert("zip".into(), zip.and_then(|z| serde_json::to_value(z).ok()).unwrap_or(Value::Null));
+    // A running crawl: its site and pages so far.
+    #[cfg(feature = "s3")]
+    if let Some(p) = app.crawls.progress(&row.job_id) {
+        m.insert("progress".into(), p);
+    }
     #[cfg(feature = "webhooks")]
     {
         // Only jobs submitted with a webhook pay for the second query.
@@ -1435,8 +1460,7 @@ pub async fn job_get(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<Res
     let row =
         app.jobs.row(&app.db, &p.job_id).await.map_err(db_err)?.ok_or_else(|| AppError::new(404, "job_not_found", "unknown job_id"))?;
     let info = job_info(app, &row).await;
-    let result_path =
-        row.result_path.clone().map(PathBuf::from).filter(|_| matches!(row.state.as_str(), "completed" | "partial" | "failed"));
+    let result_path = row.result_path.clone().map(PathBuf::from).filter(|_| is_terminal(&row.state));
     let mut head = serde_json::to_vec(&Value::Object(info)).map_err(|_| AppError::internal("encode"))?;
     head.pop(); // strip '}' to append "result"
     head.extend_from_slice(b",\"result\":");
@@ -1499,6 +1523,9 @@ pub async fn job_zip(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<Res
         "failed" => return Err(AppError::new(409, "job_failed", "the job failed, so there is nothing to zip")),
         _ => return Err(AppError::new(409, "job_not_finished", "the job has not finished yet; ask again once it has").retry_after(5)),
     }
+    if tokio::fs::metadata(app.results_dir().join(format!("{}.pages.jsonl", row.job_id))).await.is_ok() {
+        return Err(AppError::bad_request("invalid_payload", "job.zip is for convert jobs; a crawl's pages are in its pages.jsonl"));
+    }
     let gone = || AppError::new(410, "expired", "the job's result is no longer stored; convert the document again");
     let path = row.result_path.clone().map(PathBuf::from).ok_or_else(gone)?;
     if tokio::fs::metadata(&path).await.is_err() {
@@ -1534,17 +1561,16 @@ impl Drop for Zipping {
 async fn make_zip(app: Arc<App>, row: JobRow, stored: StoredJob, dest: Option<result::Dest>, path: PathBuf, shown: Option<String>) {
     let _mark = Zipping(app.clone(), row.job_id.clone());
     let work = async {
-        let fields: Vec<String> = ZIP_FIELDS.iter().chain(&["images"]).map(|s| s.to_string()).collect();
+        let p2 = path.clone();
         let mut m = app
             .cpu
-            .run(move || select_fields(&path, &fields))
+            .run(move || select_fields(&p2, &["images".to_string()]))
             .await
             .map_err(cpu_err)?
             .map_err(|_| AppError::new(410, "expired", "the job's result is no longer stored"))?;
         let metas: Vec<result::ImageMeta> = m.remove("images").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
-        let images = metas.iter().map(|i| (app.images_dir().join(i.file_name()), i.file_name().to_string())).collect();
         let name = result::zip_name(dest.as_ref(), &stored.payload.source);
-        let (zp, n) = write_zip_from(&app, zip_location(&app, &row.job_id, dest.as_ref()).0, name, m, images).await?;
+        let (zp, n) = write_zip_from(&app, zip_location(&app, &row.job_id, dest.as_ref()).0, name, path, image_files(&app, &metas)).await?;
         if let Some(d) = &dest {
             let r = result::publish_zip(d, &zp, true).await;
             let _ = tokio::fs::remove_file(&zp).await;
@@ -1557,11 +1583,11 @@ async fn make_zip(app: Arc<App>, row: JobRow, stored: StoredJob, dest: Option<re
         Err(e) => ZipInfo { status: "failed".into(), zip_file: shown, zip_bytes: 0, error: serde_json::to_value(e.body()).ok() },
     };
     write_zip_info(&app, &row.job_id, &info).await;
-    tracing::info!(target: "docvision_llm_ws::jobs", job_id = %row.job_id, status = %info.status, zip_bytes = info.zip_bytes, "zip built");
+    tracing::info!(target: "docvisionllm::jobs", job_id = %row.job_id, status = %info.status, zip_bytes = info.zip_bytes, "zip built");
     let event = if info.status == "completed" { "zip.completed" } else { "zip.failed" };
     let data = serde_json::to_value(&info).unwrap_or(Value::Null);
     for (i, w) in stored.payload.webhooks().iter().enumerate() {
-        crate::webhook::schedule_event(app.clone(), row.job_id.clone(), row.request_id.clone(), w.clone(), i, event, data.clone());
+        crate::webhook::schedule_event(app.clone(), row.job_id.clone(), row.request_id.clone(), w.clone(), i, event, None, data.clone());
     }
 }
 

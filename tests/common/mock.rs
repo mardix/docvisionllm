@@ -99,8 +99,12 @@ fn reply_for(st: &MockState, system: &str, user_text: &str, has_file: bool, json
         }
     } else if json_mode {
         st.enrich_calls.fetch_add(1, SeqCst);
-        json!({"title": "Mock Title", "summary": "Mock summary of the document.", "language": "en", "language_confidence": 0.93})
-            .to_string()
+        let mut v =
+            json!({"title": "Mock Title", "summary": "Mock summary of the document.", "language": "en", "language_confidence": 0.93});
+        if user_text.contains("\"search\"") {
+            v["search"] = json!({"keywords": ["mock", "report"], "entities": ["Mock Corp"], "questions": ["What is in the report?"], "topics": ["testing"], "type": "report"});
+        }
+        v.to_string()
     } else if system.contains("translator") {
         st.translations.fetch_add(1, SeqCst);
         user_text.split_once("\n\n").map(|x| x.1.to_string()).unwrap_or_default()

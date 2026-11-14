@@ -6,7 +6,7 @@ use crate::db::{RequestFinish, RequestRow, WriteOp, now_ms};
 use crate::gateway::{CallSpec, Prio};
 use crate::llm::{Accounting, Endpoint, LlmRequest};
 use crate::markdown;
-use crate::result::{Body, FeatureStatus, LanguageDetection};
+use crate::result::{Body, FeatureStatus, LanguageDetection, Search};
 use crate::rpc::{AppError, Method, Options, ReqCtx};
 use futures_util::future::try_join_all;
 use serde::Deserialize;
@@ -327,9 +327,10 @@ struct Combined {
     summary: Option<String>,
     language: Option<String>,
     language_confidence: Option<f64>,
+    search: Option<Search>,
 }
 
-async fn combined(cx: &Cx<'_>, content: &str, title: bool, summary: bool, lang: bool) -> Result<Combined, String> {
+async fn combined(cx: &Cx<'_>, content: &str, title: bool, summary: bool, lang: bool, search: bool) -> Result<Combined, String> {
     let ep = cx.ep.ok_or("no LLM provider is configured")?;
     let budget = (ep.cfg.max_input_tokens as u64 * 8 / 10).max(1000);
     let text = map_reduce(cx, content, budget).await?;
@@ -343,11 +344,14 @@ async fn combined(cx: &Cx<'_>, content: &str, title: bool, summary: bool, lang: 
     if lang {
         keys.push("\"language\": the BCP-47 code of the main language (\"mul\" if substantially mixed, \"und\" if undeterminable), and \"language_confidence\": a number from 0 to 1");
     }
+    if search {
+        keys.push("\"search\": an object that helps find this document, written in the document's language: \"keywords\" (up to 20 terms people would search with, including synonyms the text may not use), \"entities\" (up to 20 names of products, organizations, people, places, versions, settings or error codes), \"questions\" (3 to 8 questions the document answers, phrased as a reader would ask them), \"topics\" (1 to 5 broad subjects) and \"type\" (one word, such as how-to, reference, faq, article, report, policy, product, pricing, changelog, legal, other)");
+    }
     let req = LlmRequest {
         system: SYSTEM_ENRICH.into(),
         user: format!("Return a JSON object with these keys:\n- {}\n\n<document>\n{text}\n</document>", keys.join("\n- ")),
         doc: None,
-        max_output_tokens: 1024,
+        max_output_tokens: if search { 2048 } else { 1024 },
         json: true,
         schema: None,
     };
@@ -390,6 +394,21 @@ async fn translate(cx: &Cx<'_>, content: &str, target: &str) -> Result<Translati
     Ok(Translation { content, language: target.to_string() })
 }
 
+/// Detect the language locally (`lang-detect` feature). `llm_error`: the LLM was asked and
+/// failed, so this is a fallback (or a failure without the feature).
+fn local_language(content: &str, llm_error: Option<String>) -> (Option<LanguageDetection>, FeatureStatus) {
+    #[cfg(feature = "lang-detect")]
+    {
+        let d = detect_language(content);
+        (Some(d), if let Some(e) = llm_error { FeatureStatus::fallback(e) } else { FeatureStatus::done("local_whatlang") })
+    }
+    #[cfg(not(feature = "lang-detect"))]
+    {
+        let _ = content;
+        (None, FeatureStatus::failed("llm", llm_error.unwrap_or_else(|| "the lang-detect feature is not compiled".into())))
+    }
+}
+
 /// Fill title/summary/language/translation fields of `body` (content must be final).
 pub async fn enrich(cx: &Cx<'_>, opts: &Options, title_hint: Option<&str>, file_name: &str, body: &mut Body) {
     let content = body.content.as_str();
@@ -399,6 +418,7 @@ pub async fn enrich(cx: &Cx<'_>, opts: &Options, title_hint: Option<&str>, file_
     let llm_title = want_title && opts.title_method == Method::Llm;
     let llm_summary = want_summary && opts.summary_method == Method::Llm;
     let llm_lang = want_lang && opts.language_method == Method::Llm;
+    let llm_search = opts.gen_search;
     let empty = content.trim().is_empty();
     let mut fs = std::mem::take(&mut body.feature_status);
     let mut warnings = Vec::new();
@@ -418,19 +438,24 @@ pub async fn enrich(cx: &Cx<'_>, opts: &Options, title_hint: Option<&str>, file_
     if !want_lang {
         fs.insert("language", FeatureStatus::disabled());
     } else if !llm_lang || empty {
-        #[cfg(feature = "lang-detect")]
         {
-            let d = detect_language(content);
-            body.language = Some(d.code.clone());
-            body.language_detection = Some(d);
-            fs.insert("language", FeatureStatus::done("local_whatlang"));
+            let (d, st) = local_language(content, None);
+            body.language = d.as_ref().map(|d| d.code.clone());
+            body.language_detection = d;
+            fs.insert("language", st);
         }
     }
+    if !llm_search {
+        fs.insert("search", FeatureStatus::disabled());
+    } else if empty {
+        fs.insert("search", FeatureStatus { status: "skipped", method: Some("llm"), error: Some("empty content".into()) });
+    }
 
-    let any_llm = !empty && (llm_title || llm_summary || llm_lang);
+    let any_llm = !empty && (llm_title || llm_summary || llm_lang || llm_search);
     let target = opts.translate_to.clone();
-    let combined_fut =
-        async { if any_llm { Some(within(cx.deadline, combined(cx, content, llm_title, llm_summary, llm_lang)).await) } else { None } };
+    let combined_fut = async {
+        if any_llm { Some(within(cx.deadline, combined(cx, content, llm_title, llm_summary, llm_lang, llm_search)).await) } else { None }
+    };
     let translate_fut = async {
         match &target {
             Some(t) if !empty => {
@@ -489,11 +514,34 @@ pub async fn enrich(cx: &Cx<'_>, opts: &Options, title_hint: Option<&str>, file_
                 fs.insert("summary", FeatureStatus::done("llm"));
             }
             if llm_lang {
-                let code = c.language.unwrap_or_else(|| "und".into());
-                body.language = Some(code.clone());
-                body.language_detection =
-                    Some(LanguageDetection { code, method: "llm", confidence: c.language_confidence.unwrap_or(0.0).clamp(0.0, 1.0) });
-                fs.insert("language", FeatureStatus::done("llm"));
+                match c.language.map(|l| l.trim().to_string()).filter(|l| !l.is_empty()) {
+                    Some(code) => {
+                        body.language = Some(code.clone());
+                        body.language_detection = Some(LanguageDetection {
+                            code,
+                            method: "llm",
+                            confidence: c.language_confidence.unwrap_or(0.0).clamp(0.0, 1.0),
+                        });
+                        fs.insert("language", FeatureStatus::done("llm"));
+                    }
+                    None => {
+                        let (d, st) = local_language(content, Some("the LLM returned no language".into()));
+                        body.language = d.as_ref().map(|d| d.code.clone());
+                        body.language_detection = d;
+                        fs.insert("language", st);
+                    }
+                }
+            }
+            if llm_search {
+                match c.search {
+                    Some(s) => {
+                        body.search = Some(s);
+                        fs.insert("search", FeatureStatus::done("llm"));
+                    }
+                    None => {
+                        fs.insert("search", FeatureStatus::failed("llm", "the LLM returned no search fields".into()));
+                    }
+                }
             }
         }
         Some(Err(e)) => {
@@ -502,7 +550,15 @@ pub async fn enrich(cx: &Cx<'_>, opts: &Options, title_hint: Option<&str>, file_
                 body.title = local_title(title_hint, content, file_name);
                 fs.insert("title", FeatureStatus::fallback(e.clone()));
             }
-            for (on, name) in [(llm_summary, "summary"), (llm_lang, "language")] {
+            if llm_lang {
+                {
+                    let (d, st) = local_language(content, Some(e.clone()));
+                    body.language = d.as_ref().map(|d| d.code.clone());
+                    body.language_detection = d;
+                    fs.insert("language", st);
+                }
+            }
+            for (on, name) in [(llm_summary, "summary"), (llm_search, "search")] {
                 if on {
                     fs.insert(name, FeatureStatus::failed("llm", e.clone()));
                 }
@@ -576,7 +632,7 @@ async fn load_text(app: &App, p: &TextPayload) -> Result<(String, String), AppEr
         .as_deref()
         .ok_or_else(|| AppError::bad_request("invalid_payload", "payload.source_content or payload.source is required"))?;
     let parsed = crate::source::parse(src)?;
-    let fctx = crate::source::FetchCtx { http: crate::source::http_client(), staging: &app.staging_dir(), max_bytes: cap as u64 };
+    let fctx = crate::source::FetchCtx { staging: &app.staging_dir(), max_bytes: cap as u64, request: None };
     let staged = crate::source::fetch(&fctx, &parsed).await.map_err(|e| {
         if e.code == "input_too_large" {
             AppError::new(413, "inline_text_too_large", "text source exceeds DOCVISION_MAX_INLINE_TEXT_BYTES")
@@ -637,6 +693,7 @@ pub async fn summarize_op(app: &Arc<App>, ctx: &ReqCtx, payload: Value, options:
         let mut body = Body { content, ..Default::default() };
         let mut o = opts.clone();
         o.detect_language = false;
+        o.gen_search = false;
         o.translate_to = None;
         let cx = Cx { app, ep: ep.as_ref(), acct: &acct, sem: &sem, prio: Prio::Sync, deadline: None };
         enrich(&cx, &o, None, &name, &mut body).await;

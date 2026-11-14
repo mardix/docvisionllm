@@ -30,8 +30,8 @@ jobs:
       - run: cargo clippy --all-targets --no-default-features -- -D warnings
       # Build the binary alone too: test-only dependencies can enable crate features
       # (e.g. reqwest/json) that a release build would not have.
-      - run: cargo build --no-default-features --bin docvision-llm-ws
-      - run: cargo build --all-features --bin docvision-llm-ws
+      - run: cargo build --no-default-features --bin docvisionllm
+      - run: cargo build --all-features --bin docvisionllm
       - name: No OpenSSL / Clap / legacy-Office parsers in the normal dependency tree
         run: |
           for c in openssl-sys native-tls clap calamine cfb redis; do
@@ -84,12 +84,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
       - name: Build image
-        run: docker buildx build --load -t docvision-llm-ws:core .
+        run: docker buildx build --load -t docvisionllm:core .
       - name: Image size and idle RSS of the container
         run: |
-          size=$(docker image inspect docvision-llm-ws:core --format '{{.Size}}')
+          size=$(docker image inspect docvisionllm:core --format '{{.Size}}')
           echo "core image: $((size/1048576)) MiB"; test "$size" -le $((25*1048576))
-          docker run -d --name d2m --read-only -e DOCVISION_TOKEN=ci-token-0123456789abcdef -v d2m:/data -p 4242:4242 docvision-llm-ws:core
+          docker run -d --name d2m --read-only -e DOCVISION_TOKEN=ci-token-0123456789abcdef -v d2m:/data -p 4242:4242 docvisionllm:core
           for i in $(seq 1 50); do curl -sf localhost:4242/livez && break; sleep 0.1; done
           sleep 1
           pid=$(docker inspect -f '{{.State.Pid}}' d2m)

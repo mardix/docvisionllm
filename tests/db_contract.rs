@@ -1,9 +1,9 @@
 //! Repository contract suite: runs against SQLite always and against PostgreSQL when
 //! built with `--features postgres` and `DOCVISION_TEST_POSTGRES_URL` is set.
 
-use docvision_llm_ws::db::{Db, EventRow, HistoryFilter, JobRow, RequestFinish, RequestRow, WebhookRow, WriteOp, now_ms};
-use docvision_llm_ws::metrics::Metrics;
-use docvision_llm_ws::writer::Writer;
+use docvisionllm::db::{Db, EventRow, HistoryFilter, JobRow, RequestFinish, RequestRow, WebhookRow, WriteOp, now_ms};
+use docvisionllm::metrics::Metrics;
+use docvisionllm::writer::Writer;
 use std::sync::Arc;
 
 fn job(id: &str, state: &str) -> JobRow {
@@ -166,7 +166,7 @@ async fn sqlite_contract() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_contract() {
-    match docvision_llm_ws::db::postgres::contract_test_url() {
+    match docvisionllm::db::postgres::contract_test_url() {
         Some(url) => contract(&url).await,
         None => eprintln!("DOCVISION_TEST_POSTGRES_URL not set; skipping PostgreSQL contract suite"),
     }

@@ -5,7 +5,7 @@
 pub mod fixtures;
 pub mod mock;
 
-use docvision_llm_ws::config::{Config, Vars};
+use docvisionllm::config::{Config, Vars};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ pub struct TestServer {
     pub url: String,
     pub client: reqwest::Client,
     pub dir: PathBuf,
-    pub app: Arc<docvision_llm_ws::App>,
+    pub app: Arc<docvisionllm::App>,
     pub mock: Arc<mock::MockState>,
     pub mock_url: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
@@ -74,10 +74,10 @@ pub async fn server_full(
     tweak(&mut vars);
     let mut cfg = Config::from_vars(&vars).unwrap();
     tweak_cfg(&mut cfg);
-    let running = docvision_llm_ws::start(cfg).await.unwrap();
+    let running = docvisionllm::start(cfg).await.unwrap();
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
-    let router = docvision_llm_ws::router(running.app.clone());
+    let router = docvisionllm::router(running.app.clone());
     tokio::spawn(async move { axum::serve(l, router).await.unwrap() });
     TestServer {
         url: format!("http://{addr}"),
@@ -114,6 +114,10 @@ impl TestServer {
         f.to_str().unwrap().to_string()
     }
 
+    pub async fn convert_sync_url(&self, url: &str, options: Value) -> (u16, Value) {
+        self.convert_sync(url, options).await
+    }
+
     pub async fn convert_sync(&self, path: &str, options: Value) -> (u16, Value) {
         let mut o = options;
         o["execution"] = json!("sync");
@@ -125,7 +129,7 @@ impl TestServer {
         for _ in 0..200 {
             let (_, w) = self.rpc("job.wait", json!({"job_id": job_id, "timeout_ms": 5000}), json!({})).await;
             let st = w["data"]["status"].as_str().unwrap_or("");
-            if matches!(st, "completed" | "partial" | "failed") {
+            if matches!(st, "completed" | "partial" | "failed" | "limit_reached" | "cancelled") {
                 let (_, g) = self.rpc("job.get", json!({"job_id": job_id}), json!({})).await;
                 return g["data"].clone();
             }

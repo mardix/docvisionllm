@@ -16,7 +16,23 @@ pub fn key(source_hash: &blake3::Hash, opts: &Options, provider: &str, model: &s
     let mut v = opts.sanitized();
     if let Some(o) = v.as_object_mut() {
         // Delivery options and the provider/model (hashed separately) do not affect the output.
-        for k in ["execution", "overwrite", "cache", "priority", "llm_provider", "llm_model", "create_zip", "zip_only"] {
+        for k in [
+            "execution",
+            "overwrite",
+            "cache",
+            "priority",
+            "llm_provider",
+            "llm_model",
+            "create_zip",
+            "zip_only",
+            "max_pages",
+            "max_depth",
+            "same_site",
+            "include",
+            "exclude",
+            "use_sitemap",
+            "respect_robots",
+        ] {
             o.remove(k);
         }
         o.insert("pdf_skip_local_processing".into(), serde_json::Value::Bool(opts.skip_local()));

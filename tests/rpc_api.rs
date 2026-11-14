@@ -114,7 +114,7 @@ async fn legacy_office_is_415() {
 }
 
 fn local() -> Value {
-    json!({"summary_method": "local", "title_method": "local"})
+    json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false, "gen_chunks": true})
 }
 
 #[tokio::test]
@@ -137,16 +137,17 @@ async fn native_formats_sync() {
     assert_eq!(d["title"], "Docx Meta Title");
     assert!(d["summary"].as_str().unwrap().starts_with("Extractive summary:"));
     assert!(d["job_id"].is_null());
-    assert!(d["dest_file"].is_null() && d["md_file"].is_null() && d["docv_file"].is_null() && d["docv_bytes"].is_null());
+    assert!(d["dest_file"].is_null() && d["output_file"].is_null());
+    assert_eq!((d["schema_version"].as_u64(), d["operation"].as_str()), (Some(2), Some("convert")));
+    assert!(d["content_hash"].as_str().unwrap().starts_with("b3:") && d["converted_at"].is_string() && d["fetched_at"].is_null());
     assert_eq!(d["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len(), "the original's size");
-    assert_eq!(d["md_bytes"].as_u64().unwrap(), d["content"].as_str().unwrap().len() as u64);
+    assert_eq!(d["statistics"]["content_bytes"].as_u64().unwrap(), d["content"].as_str().unwrap().len() as u64);
     // History records the sizes for sync requests too; nothing was written, so no paths.
     s.flush().await;
     let (_, h) = s.rpc("history.get", json!({"request_id": v["request_id"]}), json!({})).await;
     let q = &h["data"]["request"];
     assert_eq!(q["src_bytes"], d["src_bytes"], "{q}");
-    assert_eq!(q["md_bytes"], d["md_bytes"]);
-    assert!(q["md_file"].is_null() && q["docv_file"].is_null() && q["dest_file"].is_null());
+    assert!(q["output_file"].is_null() && q["dest_file"].is_null());
     assert_eq!(d["llm"]["totals"]["calls"], 0);
     assert!(d["statistics"]["total_words"].as_u64().unwrap() > 100);
     assert!(d["statistics"]["original_total_pages"].is_null());
@@ -197,12 +198,17 @@ async fn native_formats_sync() {
 async fn disabled_features_make_zero_calls() {
     let s = server().await;
     let p = s.write("r.docx", &fixtures::docx(1));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_chunks": false})).await;
+    let (st, v) = s
+        .convert_sync(
+            &p,
+            json!({"gen_summary": false, "gen_title": false, "gen_chunks": false, "gen_search": false, "detect_language": false}),
+        )
+        .await;
     assert_eq!(st, 200, "{v}");
     let d = &v["data"];
     assert!(d["summary"].is_null());
     assert!(d["title"].is_null());
-    assert_eq!(d["chunks"], json!([]));
+    assert!(d["chunks"].is_null() && d["search"].is_null());
     assert_eq!(d["llm"]["totals"]["calls"], 0);
     assert_eq!(d["feature_status"]["summary"]["status"], "disabled");
     assert_eq!(s.mock.requests.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -217,7 +223,12 @@ async fn llm_enrichment_combined_call() {
     let d = &v["data"];
     assert_eq!(d["title"], "Mock Title");
     assert_eq!(d["summary"], "Mock summary of the document.");
-    // Title + summary in ONE call.
+    // By default: title, summary, language and search in ONE call; no chunks.
+    assert_eq!((d["language"].as_str(), d["language_detection"]["method"].as_str()), (Some("en"), Some("llm")));
+    assert_eq!(d["search"]["questions"][0], "What is in the report?");
+    assert_eq!(d["search"]["type"], "report");
+    assert_eq!(d["feature_status"]["search"]["status"], "completed");
+    assert!(d["chunks"].is_null(), "chunks are off by default");
     assert_eq!(d["llm"]["totals"]["calls"], 1);
     assert_eq!(s.mock.enrich_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let call = &d["llm"]["calls"][0];
@@ -251,7 +262,13 @@ async fn llm_title_failure_falls_back_to_local() {
 async fn summarize_and_chunk_operations() {
     let s = server().await;
     let md = "# Title\n\nFirst paragraph sentence is here. Another one follows.\n\n## Part\n\nMore.\n";
-    let (st, v) = s.rpc("summarize", json!({"source_content": md}), json!({"summary_method": "local", "title_method": "local"})).await;
+    let (st, v) = s
+        .rpc(
+            "summarize",
+            json!({"source_content": md}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}),
+        )
+        .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["data"]["title"], "Title");
     assert!(v["data"]["summary"].as_str().unwrap().contains("First paragraph"));
@@ -376,7 +393,7 @@ async fn structured_extraction() {
     use std::sync::atomic::Ordering::SeqCst;
     let s = server().await;
     let p = s.write("receipt.md", b"# Corner Cafe\n\nLatte x2  9.00\nTotal: 9.00 USD\n");
-    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local"});
+    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false});
     let (st, v) = s.convert_sync(&p, opts.clone()).await;
     assert_eq!(st, 200, "{v}");
     let d = &v["data"];
@@ -390,7 +407,7 @@ async fn structured_extraction() {
     let (_, v) = s
         .convert_sync(
             &p,
-            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local"}),
+            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     assert_eq!(v["data"]["extracted"]["total"], 42.5, "{v}");
@@ -401,7 +418,7 @@ async fn structured_extraction() {
     let (st, v) = s
         .convert_sync(
             &p,
-            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local"}),
+            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     assert_eq!(st, 200, "{v}");
@@ -410,7 +427,12 @@ async fn structured_extraction() {
     assert!(v["data"]["feature_status"]["extraction"]["error"].as_str().unwrap().contains("$.merchant is required"));
 
     // Without extract_schema nothing changes.
-    let (_, v) = s.convert_sync(&p, json!({"title_method": "local", "summary_method": "local", "cache": "bypass"})).await;
+    let (_, v) = s
+        .convert_sync(
+            &p,
+            json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false, "cache": "bypass"}),
+        )
+        .await;
     assert!(v["data"]["extracted"].is_null());
     assert_eq!(v["data"]["feature_status"]["extraction"]["status"], "disabled");
 

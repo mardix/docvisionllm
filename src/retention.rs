@@ -60,7 +60,7 @@ pub async fn run(app: Arc<App>, mut shutdown: watch::Receiver<bool>) {
             .await
             .unwrap_or(0);
         if removed > 0 {
-            tracing::info!(target: "docvision_llm_ws::retention", removed, "retention removed expired files");
+            tracing::info!(target: "docvisionllm::retention", removed, "retention removed expired files");
         }
     }
 }

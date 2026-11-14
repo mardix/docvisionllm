@@ -22,6 +22,9 @@ pub fn validate(w: &WebhookSpec) -> Result<(), AppError> {
     if w.body.as_ref().is_some_and(|b| b.to_string().len() > 16 * 1024) {
         return Err(AppError::bad_request("invalid_webhook", "webhook.body must be at most 16 KiB"));
     }
+    if w.events.iter().any(|e| e != "page.finished") {
+        return Err(AppError::bad_request("invalid_webhook", "webhook.events may only contain \"page.finished\""));
+    }
     if w.headers.len() > 32 {
         return Err(AppError::bad_request("invalid_webhook", "at most 32 webhook headers"));
     }
@@ -123,9 +126,11 @@ pub fn schedule(
     let _ = (app, job_id, request_id, spec, index, result_path, start_attempt);
 }
 
-/// Send a later event about a job (`zip.completed`, `zip.failed`) to one of its webhooks:
-/// `{event_id, event, job_id, request_id, ...data}`, signed and retried like `job.finished`.
-/// Body templates apply only to `job.finished`.
+/// Send another event about a job (`zip.completed`, `zip.failed`, `page.finished`) to one of
+/// its webhooks: `{event_id, event, job_id, request_id, ...data}`, signed and retried like
+/// `job.finished`. Body templates apply only to `job.finished`. `key` makes the event ID unique
+/// when a job sends the event more than once (one per page).
+#[allow(clippy::too_many_arguments)]
 pub fn schedule_event(
     app: Arc<App>,
     job_id: String,
@@ -133,13 +138,17 @@ pub fn schedule_event(
     spec: WebhookSpec,
     index: usize,
     event: &'static str,
+    key: Option<String>,
     data: Value,
 ) {
     #[cfg(feature = "webhooks")]
     tokio::spawn(async move {
         use crate::db::{WebhookRow, WriteOp, now_ms};
         // Its own ID (not resumed after a restart: `job.zip` can simply be asked again).
-        let eid = format!("{}_{}", event_id(&job_id, index), event.replace('.', "-"));
+        let mut eid = format!("{}_{}", event_id(&job_id, index), event.replace('.', "-"));
+        if let Some(k) = key {
+            eid = format!("{eid}-{}", &blake3::hash(k.as_bytes()).to_hex()[..16]);
+        }
         let mut body = serde_json::json!({"event_id": eid, "event": event, "job_id": job_id, "request_id": request_id});
         if let (Some(b), Value::Object(d)) = (body.as_object_mut(), data) {
             b.extend(d);
@@ -160,7 +169,7 @@ pub fn schedule_event(
         attempts(&app, &job_id, &spec, &eid, row, payload, 0).await;
     });
     #[cfg(not(feature = "webhooks"))]
-    let _ = (app, job_id, request_id, spec, index, event, data);
+    let _ = (app, job_id, request_id, spec, index, event, key, data);
 }
 
 #[cfg_attr(not(feature = "webhooks"), allow(dead_code))]
@@ -223,51 +232,43 @@ pub fn render(t: &Value, root: &Value) -> Value {
 async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &WebhookSpec, path: &std::path::Path) -> Option<Payload> {
     let p = path.to_path_buf();
     let Some(template) = &spec.body else {
-        let fields: Vec<String> = [
+        // A short event: what happened and where things are, never the content.
+        const FIELDS: [&str; 17] = [
+            "operation",
             "status",
+            "site",
             "src_file",
             "src_bytes",
             "dest_file",
-            "md_file",
-            "md_bytes",
-            "docv_file",
-            "docv_bytes",
+            "output_file",
             "images_dir",
             "zip_file",
             "zip_bytes",
+            "pages",
+            "pages_file",
+            "site_pages_file",
             "metadata",
             "statistics",
-            "llm",
             "timing",
             "error",
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+        ];
+        let fields: Vec<String> = FIELDS.iter().chain(&["llm"]).map(|s| s.to_string()).collect();
+        let size = tokio::fs::metadata(&p).await.ok().map(|m| m.len());
         let mut m = app.cpu.run(move || crate::jobs::select_fields(&p, &fields)).await.ok()?.ok()?;
-        let totals = m.remove("llm").and_then(|mut l| l.get_mut("totals").map(Value::take));
-        let v = serde_json::json!({
-            "event_id": eid,
-            "event": "job.finished",
-            "job_id": job_id,
-            "request_id": request_id,
-            "status": m.remove("status"),
-            "src_file": m.remove("src_file"),
-            "src_bytes": m.remove("src_bytes"),
-            "dest_file": m.remove("dest_file"),
-            "md_file": m.remove("md_file"),
-            "md_bytes": m.remove("md_bytes"),
-            "docv_file": m.remove("docv_file"),
-            "docv_bytes": m.remove("docv_bytes"),
-            "images_dir": m.remove("images_dir"),
-            "zip_file": m.remove("zip_file"),
-            "zip_bytes": m.remove("zip_bytes"),
-            "metadata": m.remove("metadata"),
-            "statistics": m.remove("statistics"),
-            "llm": totals,
-            "timing": m.remove("timing"),
-            "error": m.remove("error"),
-        });
+        let mut v = serde_json::Map::new();
+        v.insert("event_id".into(), eid.into());
+        v.insert("event".into(), "job.finished".into());
+        v.insert("job_id".into(), job_id.into());
+        v.insert("request_id".into(), request_id.into());
+        for f in FIELDS {
+            if let Some(x) = m.remove(f) {
+                v.insert(f.into(), x);
+            }
+        }
+        if v.get("output_file").is_some_and(|o| !o.is_null()) {
+            v.insert("output_bytes".into(), size.into());
+        }
+        v.insert("llm".into(), m.remove("llm").and_then(|mut l| l.get_mut("totals").map(Value::take)).unwrap_or(Value::Null));
         return serde_json::to_vec(&v).ok().map(|b| Payload::Bytes(b.into()));
     };
     let len = tokio::fs::metadata(&p).await.ok()?.len();
@@ -395,7 +396,7 @@ async fn attempts(
                 true
             }
         };
-        tracing::info!(target: "docvision_llm_ws::webhook", job_id = %job_id, attempt = row.attempts, status = %row.status, elapsed_ms = started.elapsed().as_millis() as u64, "webhook attempt");
+        tracing::info!(target: "docvisionllm::webhook", job_id = %job_id, attempt = row.attempts, status = %row.status, elapsed_ms = started.elapsed().as_millis() as u64, "webhook attempt");
         if spec.fire_and_forget {
             // Send and forget: one attempt; any HTTP response counts, its status is not checked.
             row.status = if row.last_http_status.is_some() { "sent" } else { "failed" }.into();

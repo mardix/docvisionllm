@@ -1,9 +1,12 @@
-//! docvision-llm-ws: a lean, high-throughput document-to-Markdown HTTP service.
+//! docvisionllm: a lean, high-throughput document-to-Markdown HTTP service.
 
 pub mod admission;
+pub mod browser;
 pub mod cache;
 pub mod config;
 pub mod cpu;
+#[cfg(feature = "s3")]
+pub mod crawl;
 pub mod db;
 pub mod doc;
 pub mod enrich;
@@ -48,6 +51,10 @@ pub struct App {
     pub running_jobs: std::sync::atomic::AtomicUsize,
     pub history_key: [u8; 32],
     pub started: Instant,
+    /// The browser container, when `DOCVISION_BROWSER_URL` is set.
+    pub browser: Option<browser::Browser>,
+    #[cfg(feature = "s3")]
+    pub crawls: crawl::Crawls,
 }
 
 impl App {
@@ -72,7 +79,8 @@ pub struct Running {
 /// Build the application: directories, DB + migrations, writer, gates, recovery, background tasks.
 pub async fn start(cfg: Config) -> Result<Running, String> {
     let t0 = Instant::now();
-    let step = |name: &str| tracing::debug!(target: "docvision_llm_ws::startup", step = name, elapsed_us = t0.elapsed().as_micros() as u64, "startup");
+    let step =
+        |name: &str| tracing::debug!(target: "docvisionllm::startup", step = name, elapsed_us = t0.elapsed().as_micros() as u64, "startup");
     for d in [cfg.data_dir.clone(), cfg.data_dir.join("staging"), cfg.data_dir.join("results"), cfg.data_dir.join("images")] {
         std::fs::create_dir_all(&d).map_err(|e| format!("cannot create {}: {e}", d.display()))?;
     }
@@ -95,6 +103,12 @@ pub async fn start(cfg: Config) -> Result<Running, String> {
         jobs: jobs::Jobs::default(),
         reject_cap: rpc::RateCap::default(),
         started: Instant::now(),
+        #[cfg(feature = "s3")]
+        crawls: Default::default(),
+        browser: match &cfg.browser_url {
+            Some(u) => Some(browser::Browser::new(u, cfg.browser_concurrency)?),
+            None => None,
+        },
         metrics,
         writer,
         db,
@@ -127,6 +141,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/_/db", get(rpc::db_download))
         .route("/_/images/{name}", get(rpc::image_file))
         .route("/_/jobs/{job_id}/zip", get(rpc::zip_file))
+        .route("/_/jobs/{job_id}/pages.jsonl", get(rpc::pages_file))
         .layer(CompressionLayer::new().compress_when(SizeAbove::new(4096).and(NotForContentType::IMAGES)))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(body_cap))
         .with_state(app)

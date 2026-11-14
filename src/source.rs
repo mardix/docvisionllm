@@ -4,7 +4,8 @@
 use crate::config::Secret;
 use crate::rpc::AppError;
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
@@ -201,6 +202,99 @@ pub fn file_name(s: &str) -> String {
     decode(name).unwrap_or_else(|_| name.to_string())
 }
 
+/// `payload.request`: headers, query parameters, cookies and user agent for fetching an
+/// HTTP(S) source. They are secrets: kept only in the encrypted job, never shown or stored in
+/// results, and sent only to the source's own host (never to other hosts or across redirects).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct FetchRequest {
+    pub headers: BTreeMap<String, String>,
+    pub query: BTreeMap<String, String>,
+    pub cookies: BTreeMap<String, String>,
+    pub user_agent: Option<String>,
+}
+
+/// The host part that identifies a site: lowercase, without a leading `www.`.
+pub fn site_host(u: &url::Url) -> String {
+    let h = u.host_str().unwrap_or("").to_ascii_lowercase();
+    h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
+}
+
+impl FetchRequest {
+    pub fn validate(&self) -> Result<(), AppError> {
+        let bad = |m: String| Err(AppError::bad_request("invalid_request", m));
+        let size: usize = self.headers.iter().chain(&self.query).chain(&self.cookies).map(|(k, v)| k.len() + v.len()).sum::<usize>()
+            + self.user_agent.as_ref().map_or(0, String::len);
+        if self.headers.len() + self.cookies.len() + self.query.len() > 64 || size > 8 * 1024 {
+            return bad("request takes at most 64 headers, query parameters and cookies, 8 KiB in total".into());
+        }
+        for (k, v) in &self.headers {
+            let lower = k.to_ascii_lowercase();
+            if reqwest::header::HeaderName::from_bytes(k.as_bytes()).is_err()
+                || reqwest::header::HeaderValue::from_str(v).is_err()
+                || lower.starts_with("x-docvision-")
+                || ["host", "content-length", "connection", "transfer-encoding", "upgrade", "te"].contains(&lower.as_str())
+            {
+                return bad(format!("request header `{k}` is not allowed"));
+            }
+        }
+        if self.query.keys().any(String::is_empty) {
+            return bad("request.query names must not be empty".into());
+        }
+        if self.cookies.iter().any(|(k, v)| k.is_empty() || k.contains([';', '=', ' ']) || v.contains([';', '\r', '\n'])) {
+            return bad("request.cookies names and values must not contain `;`, `=` (names) or line breaks".into());
+        }
+        if self.user_agent.as_ref().is_some_and(|u| reqwest::header::HeaderValue::from_str(u).is_err()) {
+            return bad("request.user_agent is not a valid header value".into());
+        }
+        Ok(())
+    }
+
+    /// `u` with the request's query parameters added (existing ones with the same name kept).
+    pub fn apply_query(&self, u: &url::Url) -> url::Url {
+        let mut u = u.clone();
+        let have: Vec<String> = u.query_pairs().map(|(k, _)| k.into_owned()).collect();
+        let add: Vec<_> = self.query.iter().filter(|(k, _)| !have.contains(k)).collect();
+        if !add.is_empty() {
+            let mut q = u.query_pairs_mut();
+            for (k, v) in add {
+                q.append_pair(k, v);
+            }
+        }
+        u
+    }
+
+    /// `u` without the request's query parameters, so secrets never appear in shown URLs.
+    pub fn strip_query(&self, u: &url::Url) -> url::Url {
+        let mut u = u.clone();
+        if self.query.is_empty() || u.query().is_none() {
+            return u;
+        }
+        let keep: Vec<(String, String)> =
+            u.query_pairs().filter(|(k, _)| !self.query.contains_key(k.as_ref())).map(|(k, v)| (k.into(), v.into())).collect();
+        u.set_query(None);
+        if !keep.is_empty() {
+            u.query_pairs_mut().extend_pairs(keep);
+        }
+        u
+    }
+
+    /// Headers to send to `u` when its site is `site` (empty for any other host).
+    pub fn headers_for(&self, u: &url::Url, site: &str) -> Vec<(String, String)> {
+        if site_host(u) != site {
+            return Vec::new();
+        }
+        let mut h: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if !self.cookies.is_empty() {
+            h.push(("Cookie".into(), self.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")));
+        }
+        if let Some(ua) = &self.user_agent {
+            h.push(("User-Agent".into(), ua.clone()));
+        }
+        h
+    }
+}
+
 /// A source staged on local disk. Service-owned staging files are removed on drop.
 #[derive(Debug)]
 pub struct Staged {
@@ -208,6 +302,9 @@ pub struct Staged {
     pub size: u64,
     pub hash: blake3::Hash,
     pub owned: bool,
+    /// For URL sources: the final URL after redirects, and when it was fetched.
+    pub final_url: Option<url::Url>,
+    pub fetched_at: Option<i64>,
 }
 
 impl Drop for Staged {
@@ -231,18 +328,22 @@ pub fn webpki_only(b: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     }
 }
 
-/// Client for sources and webhooks, built on first use (TLS root loading is not paid at startup).
+/// Client for webhooks and providers, built on first use (TLS root loading is not paid at startup).
 pub fn http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| build_http_client(std::time::Duration::from_secs(10)))
+    CLIENT.get_or_init(|| build_http_client(true))
 }
 
-fn build_http_client(connect_timeout: std::time::Duration) -> reqwest::Client {
-    webpki_only(reqwest::Client::builder())
-        .use_rustls_tls()
-        .connect_timeout(connect_timeout)
-        .read_timeout(std::time::Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::custom(|a| {
+/// Client for fetching sources: redirects are followed by [`get`], which decides per hop
+/// whether `payload.request` headers may be sent.
+fn fetch_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| build_http_client(false))
+}
+
+fn build_http_client(follow: bool) -> reqwest::Client {
+    let policy = if follow {
+        reqwest::redirect::Policy::custom(|a| {
             if a.previous().len() >= 5 {
                 a.error("too many redirects")
             } else if !web_url_allowed(a.url()) {
@@ -250,9 +351,51 @@ fn build_http_client(connect_timeout: std::time::Duration) -> reqwest::Client {
             } else {
                 a.follow()
             }
-        }))
+        })
+    } else {
+        reqwest::redirect::Policy::none()
+    };
+    webpki_only(reqwest::Client::builder())
+        .use_rustls_tls()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(60))
+        .user_agent(concat!("docvision/", env!("CARGO_PKG_VERSION")))
+        .redirect(policy)
         .build()
         .expect("http client")
+}
+
+/// GET `u`, following up to 5 redirects. `request` headers, cookies and query parameters go
+/// only to `u`'s own site, so a redirect elsewhere never carries them.
+pub async fn get(u: &url::Url, request: Option<&FetchRequest>) -> Result<(reqwest::Response, url::Url), AppError> {
+    let site = site_host(u);
+    let mut url = u.clone();
+    for _ in 0..=5 {
+        let same = site_host(&url) == site;
+        let target = match request {
+            Some(r) if same => r.apply_query(&url),
+            _ => url.clone(),
+        };
+        let mut rb = fetch_client().get(target);
+        for (k, v) in request.map(|r| r.headers_for(&url, &site)).unwrap_or_default() {
+            rb = rb.header(k, v);
+        }
+        let resp = rb.send().await.map_err(|e| upstream_err(&e))?;
+        if !resp.status().is_redirection() {
+            return Ok((resp, url));
+        }
+        let next = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|l| l.to_str().ok())
+            .and_then(|l| url.join(l).ok())
+            .ok_or_else(|| AppError::new(502, "source_fetch_failed", "redirect without a valid location").stage("fetch"))?;
+        if !web_url_allowed(&next) {
+            return Err(AppError::new(502, "source_fetch_failed", "redirect left HTTPS").stage("fetch"));
+        }
+        url = next;
+    }
+    Err(AppError::new(502, "source_fetch_failed", "too many redirects").stage("fetch"))
 }
 
 /// Best-effort size before fetching, for memory admission.
@@ -272,9 +415,9 @@ pub async fn size_hint(src: &Source) -> Option<u64> {
 }
 
 pub struct FetchCtx<'a> {
-    pub http: &'a reqwest::Client,
     pub staging: &'a Path,
     pub max_bytes: u64,
+    pub request: Option<&'a FetchRequest>,
 }
 
 fn too_large(max: u64) -> AppError {
@@ -323,19 +466,27 @@ pub async fn fetch(ctx: &FetchCtx<'_>, src: &Source) -> Result<Staged, AppError>
             .await
             .map_err(|_| AppError::internal("hash task failed"))?
             .map_err(|e| AppError::new(502, "source_read_failed", format!("cannot read source: {}", e.kind())).stage("fetch"))?;
-            Ok(Staged { path: p.clone(), size: meta.len(), hash, owned: false })
+            Ok(Staged { path: p.clone(), size: meta.len(), hash, owned: false, final_url: None, fetched_at: None })
         }
         Source::Https(u) => {
-            let resp = ctx.http.get(u.clone()).send().await.map_err(|e| upstream_err(&e))?;
+            let fetched_at = crate::db::now_ms();
+            let (resp, final_url) = get(u, ctx.request).await?;
             let status = resp.status();
             if !status.is_success() {
                 let code = if status.as_u16() == 404 { 404 } else { 502 };
-                return Err(AppError::new(code, "source_fetch_failed", format!("source returned HTTP {}", status.as_u16())).stage("fetch"));
+                let mut e = AppError::new(code, "source_fetch_failed", format!("source returned HTTP {}", status.as_u16())).stage("fetch");
+                if matches!(status.as_u16(), 429 | 503) {
+                    e = e.retry_after(resp.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(30));
+                }
+                return Err(e);
             }
             if resp.content_length().is_some_and(|l| l > ctx.max_bytes) {
                 return Err(too_large(ctx.max_bytes));
             }
-            stream_to_staging(ctx, resp.bytes_stream().map(|r| r.map_err(|e| upstream_err(&e)))).await
+            let mut staged = stream_to_staging(ctx, resp.bytes_stream().map(|r| r.map_err(|e| upstream_err(&e)))).await?;
+            staged.final_url = Some(final_url);
+            staged.fetched_at = Some(fetched_at);
+            Ok(staged)
         }
         #[cfg(feature = "s3")]
         Source::S3(loc) => {
@@ -368,14 +519,14 @@ fn upstream_err(e: &reqwest::Error) -> AppError {
     }
 }
 
-async fn stream_to_staging<S>(ctx: &FetchCtx<'_>, mut stream: S) -> Result<Staged, AppError>
+pub async fn stream_to_staging<S>(ctx: &FetchCtx<'_>, mut stream: S) -> Result<Staged, AppError>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, AppError>> + Unpin,
 {
     let path = ctx.staging.join(uuid::Uuid::now_v7().to_string());
     let mut file = tokio::fs::File::create(&path).await.map_err(|_| AppError::internal("cannot create staging file"))?;
     // From here on the staging file is owned and removed on any error.
-    let mut staged = Staged { path, size: 0, hash: blake3::Hash::from_bytes([0; 32]), owned: true };
+    let mut staged = Staged { path, size: 0, hash: blake3::Hash::from_bytes([0; 32]), owned: true, final_url: None, fetched_at: None };
     let mut hasher = blake3::Hasher::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -551,6 +702,26 @@ mod tests {
         assert_eq!(sb(b"\x89PNG\r\n\x1a\nxxxx", "a").unwrap(), Format::Png);
         let names = || Some(vec!["[Content_Types].xml".to_string(), "word/document.xml".to_string()]);
         assert_eq!(sniff_bytes(b"PK\x03\x04rest", "a", names, || None).unwrap(), Format::Docx);
+    }
+
+    #[test]
+    fn request_scope() {
+        let r = FetchRequest {
+            headers: [("Authorization".to_string(), "Bearer t".to_string())].into(),
+            query: [("token".to_string(), "x".to_string())].into(),
+            cookies: [("s".to_string(), "1".to_string())].into(),
+            user_agent: None,
+        };
+        r.validate().unwrap();
+        let u = url::Url::parse("https://www.ex.com/a?page=2").unwrap();
+        assert_eq!(site_host(&u), "ex.com");
+        assert_eq!(r.headers_for(&u, "ex.com").len(), 2);
+        assert!(r.headers_for(&url::Url::parse("https://cdn.other.com/x").unwrap(), "ex.com").is_empty());
+        let q = r.apply_query(&u);
+        assert_eq!(q.as_str(), "https://www.ex.com/a?page=2&token=x");
+        assert_eq!(r.strip_query(&q).as_str(), "https://www.ex.com/a?page=2");
+        let bad = FetchRequest { headers: [("Host".to_string(), "x".to_string())].into(), ..Default::default() };
+        assert!(bad.validate().is_err());
     }
 
     #[test]

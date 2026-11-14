@@ -5,7 +5,8 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 
-const OPTS: fn() -> Value = || json!({"extract_images": true, "title_method": "local", "summary_method": "local"});
+const OPTS: fn() -> Value =
+    || json!({"extract_images": true, "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false});
 
 fn image_refs(content: &str) -> Vec<String> {
     content.match_indices("](images/").map(|(i, _)| content[i + 2..].split(')').next().unwrap().to_string()).collect()
@@ -50,7 +51,9 @@ async fn docx_images_are_extracted_once_and_referenced_in_place() {
 async fn off_by_default() {
     let s = server().await;
     let p = s.write("report.docx", &fixtures::docx_with_pictures());
-    let (_, v) = s.convert_sync(&p, json!({"title_method": "local", "summary_method": "local"})).await;
+    let (_, v) = s
+        .convert_sync(&p, json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}))
+        .await;
     assert_eq!(v["data"]["images"], json!([]));
     assert!(!v["data"]["content"].as_str().unwrap().contains("images/"));
     assert!(v["data"]["warnings"].to_string().contains("not transcribed"));
@@ -114,7 +117,8 @@ async fn destination_gets_an_images_folder_and_cache_hits_keep_them() {
     let file = r["images"][0]["path"].as_str().unwrap().trim_start_matches("images/").to_string();
     assert_eq!(r["images_dir"], format!("{}images/", folder), "{r}");
     // The Markdown's relative references resolve next to it.
-    let md = std::fs::read_to_string(out.join("report.docx.md")).unwrap();
+    let line: serde_json::Value = serde_json::from_slice(&std::fs::read(out.join("report.docx.jsonl")).unwrap()).unwrap();
+    let md = line["content"].as_str().unwrap();
     assert!(md.contains(&format!("](images/{file})")));
     assert!(out.join("images").join(&file).exists());
     // A repeat is a cache hit and still publishes the images, into another folder.
@@ -140,7 +144,7 @@ async fn pdf_images_per_page() {
     let p = s.write("scan.pdf", &fixtures::pdf_with_images());
     // Native text (ocr off), so placement is per page.
     let (st, v) =
-        s.convert_sync(&p, json!({"extract_images": true, "ocr": "off", "title_method": "local", "summary_method": "local"})).await;
+        s.convert_sync(&p, json!({"extract_images": true, "ocr": "off", "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false, "gen_chunks": true})).await;
     assert_eq!(st, 200, "{v}");
     let d = &v["data"];
     let images = d["images"].as_array().unwrap();

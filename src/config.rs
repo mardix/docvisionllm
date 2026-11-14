@@ -102,6 +102,13 @@ pub struct Config {
     pub log_format: String,
     pub multipliers: Multipliers,
     pub webhook_retry_base: Duration,
+    /// The browser container's DevTools endpoint (`http://browser:9222`); rendering is off without it.
+    pub browser_url: Option<String>,
+    pub browser_concurrency: usize,
+    /// Where crawled sites are kept (`s3://bucket/prefix/`, or an absolute local folder); `crawl` is off without it.
+    pub crawl_store: Option<String>,
+    /// Crawls running at once (each fetches at most 2 pages at a time).
+    pub max_crawls: usize,
 }
 
 /// Variables the configuration is read from (the process environment in production).
@@ -109,6 +116,27 @@ pub type Vars = BTreeMap<String, String>;
 
 fn var(vars: &Vars, name: &str) -> Option<String> {
     vars.get(&format!("DOCVISION_{name}")).map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// `DOCVISION_CRAWL_STORE`: an `s3://` location, or a folder (relative paths are resolved from
+/// the working directory). A folder is created now, so a bad one stops startup with a clear message.
+fn crawl_store(vars: &Vars) -> Result<Option<String>, String> {
+    let Some(v) = var(vars, "CRAWL_STORE") else { return Ok(None) };
+    if v.starts_with("s3://") {
+        return Ok(Some(v));
+    }
+    if v.contains("://") {
+        return Err("DOCVISION_CRAWL_STORE must be an s3:// location or a folder".into());
+    }
+    let dir = std::env::current_dir().map_err(|e| format!("DOCVISION_CRAWL_STORE: {e}"))?.join(&v);
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        format!(
+            "DOCVISION_CRAWL_STORE: cannot create {} ({e}); use a folder this process can write to, such as ./data/crawls",
+            dir.display()
+        )
+    })?;
+    let dir = std::fs::canonicalize(&dir).map_err(|e| format!("DOCVISION_CRAWL_STORE: {e}"))?;
+    Ok(Some(dir.display().to_string()))
 }
 
 pub fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -235,8 +263,8 @@ impl Config {
 
     pub fn from_vars(vars: &Vars) -> Result<Config, String> {
         let token = var(vars, "TOKEN").ok_or("DOCVISION_TOKEN is required (run scripts/setup-env.sh)")?;
-        if token.len() < 16 {
-            return Err("DOCVISION_TOKEN must be at least 16 characters".into());
+        if token.len() < 6 {
+            return Err("DOCVISION_TOKEN must be at least 6 characters".into());
         }
         let data_dir = PathBuf::from(var(vars, "DATA_DIR").unwrap_or_else(|| "./data".into()));
         let database_url =
@@ -302,7 +330,14 @@ impl Config {
             reject_log_per_sec: 50,
             multipliers: Multipliers { pdf: 2.5, ooxml: 4.0, xlsx: 8.0, text: 3.0, image: 1.4 },
             webhook_retry_base: Duration::from_secs(30),
+            browser_url: var(vars, "BROWSER_URL"),
+            browser_concurrency: get(vars, "BROWSER_CONCURRENCY", 4, num)?,
+            crawl_store: crawl_store(vars)?,
+            max_crawls: get(vars, "MAX_CRAWLS", 2, num)?,
         };
+        if cfg.browser_concurrency == 0 || cfg.max_crawls == 0 {
+            return Err("DOCVISION_BROWSER_CONCURRENCY and DOCVISION_MAX_CRAWLS must be > 0".into());
+        }
         if cfg.queue_depth == 0 || cfg.max_concurrent_jobs == 0 {
             return Err("DOCVISION_QUEUE_DEPTH and DOCVISION_MAX_CONCURRENT_JOBS must be > 0".into());
         }
@@ -345,6 +380,22 @@ mod tests {
         v.insert("DOCVISION_LLM_BASE_URL".into(), "http://x/v1".into());
         let c = Config::from_vars(&v).unwrap();
         assert_eq!(c.providers["ollama"].kind, ProviderKind::Compatible);
+    }
+
+    #[test]
+    fn crawl_store_folders() {
+        let mut v = Vars::new();
+        v.insert("DOCVISION_TOKEN".into(), "0123456789abcdef0".into());
+        let rel = format!("target/crawl-store-test-{}", std::process::id());
+        v.insert("DOCVISION_CRAWL_STORE".into(), rel.clone());
+        let c = Config::from_vars(&v).unwrap();
+        let dir = c.crawl_store.unwrap();
+        assert!(dir.starts_with('/') && dir.ends_with(&rel) && std::path::Path::new(&dir).is_dir(), "{dir}");
+        let _ = std::fs::remove_dir(&dir);
+        v.insert("DOCVISION_CRAWL_STORE".into(), "/proc/no/such/place".into());
+        assert!(Config::from_vars(&v).unwrap_err().contains("cannot create"));
+        v.insert("DOCVISION_CRAWL_STORE".into(), "s3://bucket/crawls/".into());
+        assert_eq!(Config::from_vars(&v).unwrap().crawl_store.as_deref(), Some("s3://bucket/crawls/"));
     }
 
     #[test]

@@ -3,81 +3,98 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DOCVISION-LLM dashboard</title>
+<title>DOCVISIONLLM dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Cdefs%3E%3ClinearGradient id=%22g%22 x1=%220%22 y1=%220%22 x2=%221%22 y2=%221%22%3E%3Cstop offset=%220%22 stop-color=%22%2394a3b8%22/%3E%3Cstop offset=%221%22 stop-color=%22%230f172a%22/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22url%28%23g%29%22/%3E%3Cpath d=%22M10 8h6.5a8 8 0 0 1 0 16H10z%22 fill=%22none%22 stroke=%22%23fff%22 stroke-width=%223%22 stroke-linejoin=%22round%22/%3E%3C/svg%3E">
 <style>
   :root {
     color-scheme: light;
-    --bg: #e8ecf1; --panel: #ffffff; --panel-2: #f8fafc; --text: #0f172a; --muted: #64748b; --faint: #94a3b8;
-    --line: #dce2ea; --line-strong: #cbd5e1; --soft: #f1f5f9;
+    --bg: #f8fafc; --panel: #ffffff; --panel-2: #f8fafc; --hover: #f1f5f9; --text: #0f172a; --muted: #64748b; --faint: #94a3b8;
+    --line: #e2e8f0; --line-strong: #cbd5e1; --soft: #f1f5f9;
     --ink: #0f172a; --ink-2: #1e293b; --ink-line: #334155; --ink-text: #e2e8f0; --ink-muted: #94a3b8;
-    --accent: #4f46e5; --accent-hover: #4338ca; --accent-soft: #eef2ff; --accent-ink: #3730a3;
+    --accent: #334155; --accent-hover: #1e293b; --accent-soft: #f1f5f9; --accent-ink: #0f172a; --accent-line: #94a3b8;
     --ok: #15803d; --ok-soft: #ecfdf3; --warn: #b45309; --warn-soft: #fff7ed; --bad: #b91c1c; --bad-soft: #fef2f2;
+    --code-bg: #f8fafc; --code-text: #1e293b;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    --radius: 12px;
-    --shadow: 0 1px 2px rgba(15,23,42,.05), 0 2px 6px rgba(15,23,42,.04);
+    --radius: 14px;
+    --shadow: 0 1px 2px rgba(15,23,42,.05), 0 4px 12px rgba(15,23,42,.04);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
   button, input, select, textarea { font: inherit; color: inherit; }
+  a { color: var(--accent); text-decoration: none; }
   .hidden { display: none !important; }
   .muted { color: var(--muted); }
   .mono { font-family: var(--mono); font-size: 12.5px; }
   .spacer { flex: 1; }
+  .row-flex { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
 
-  /* top bar */
-  .top { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 16px; height: 58px; padding: 0 24px; background: var(--ink); color: var(--ink-text); border-bottom: 1px solid var(--ink-line); }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .06em; font-size: 13.5px; color: #fff; text-decoration: none; }
-  .brand i { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, #818cf8, #4f46e5); box-shadow: 0 0 0 1px rgba(255,255,255,.12) inset; display: inline-block; }
-  .top nav { display: flex; gap: 2px; }
-  .top nav a { color: var(--ink-muted); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
-  .top nav a:hover { color: #fff; background: var(--ink-2); }
-  .top nav a.on { color: #fff; background: var(--ink-2); }
-  .live { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px; background: var(--ink-2); color: var(--ink-muted); font-size: 13px; cursor: pointer; border: 1px solid var(--ink-line); }
-  .live b { color: #fff; font-variant-numeric: tabular-nums; }
-  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; }
-  .live.active { color: #c7d2fe; border-color: #4338ca; background: rgba(79,70,229,.18); }
-  .live.active .dot { background: #818cf8; animation: pulse 1.4s ease-in-out infinite; }
+  /* layout: side navigation + content */
+  #app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+  .side { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; gap: 6px; padding: 18px 14px; background: var(--panel); color: var(--text); border-right: 1px solid var(--line); z-index: 4; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: .06em; font-size: 13.5px; color: var(--text); padding: 4px 8px 16px; }
+  .brand i { width: 26px; height: 26px; border-radius: 8px; background: linear-gradient(135deg, #f8fafc, #94a3b8 55%, #475569); box-shadow: 0 0 0 1px rgba(15,23,42,.08) inset; display: inline-block; flex: none; }
+  .side .newbtn { justify-content: center; background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; padding: 9px 14px; }
+  .side .newbtn:hover { background: var(--accent-hover); }
+  .nav { display: flex; flex-direction: column; gap: 2px; margin-top: 14px; }
+  .nav .label { color: var(--faint); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; padding: 10px 10px 6px; }
+  .nav a { display: flex; align-items: center; gap: 11px; padding: 8px 10px; border-radius: 9px; color: var(--muted); font-weight: 500; }
+  .nav a .i { width: 18px; text-align: center; font-size: 15px; opacity: .9; }
+  .nav a .ext { margin-left: auto; font-size: 12px; opacity: .6; }
+  .nav a:hover { color: var(--text); background: var(--soft); }
+  .nav a.on { color: var(--text); background: var(--soft); box-shadow: inset 3px 0 0 var(--accent); font-weight: 600; }
+  .side .bottom { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .live { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px; background: var(--soft); color: var(--muted); font-size: 13px; cursor: pointer; border: 1px solid var(--line); }
+  .live b { color: var(--text); font-variant-numeric: tabular-nums; }
+  .live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+  .live.active { color: #f1f5f9; border-color: var(--accent); background: var(--accent); }
+  .live.active b { color: #fff; }
+  .live.active .dot { background: #e2e8f0; animation: pulse 1.4s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .35; } }
-  #updated { color: var(--ink-muted); font-size: 12.5px; }
-  .btn { border: 1px solid var(--line-strong); background: var(--panel); padding: 7px 14px; border-radius: 8px; cursor: pointer; box-shadow: var(--shadow); }
+  #updated { color: var(--faint); font-size: 12px; padding: 0 4px; }
+  .side .link { color: var(--muted); text-align: left; padding: 4px; }
+  .side .link:hover { color: var(--text); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line-strong); background: var(--panel); padding: 7px 14px; border-radius: 9px; cursor: pointer; box-shadow: var(--shadow); white-space: nowrap; }
   .btn:hover { border-color: var(--faint); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-hover); }
+  .btn.danger { color: var(--bad); }
   .btn:disabled { opacity: .5; cursor: default; }
   .btn.sm { padding: 4px 10px; font-size: 13px; box-shadow: none; }
+  .btn.lg { padding: 10px 20px; font-weight: 600; }
   .link { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 4px 6px; }
   .link:hover { color: var(--text); }
-  .top .link { color: var(--ink-muted); }
-  .top .link:hover { color: #fff; }
 
-  main { max-width: 1320px; margin: 0 auto; padding: 24px 24px 80px; }
+  main { max-width: 1280px; width: 100%; margin: 0 auto; padding: 30px 32px 80px; }
+  .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 16px; margin-bottom: 18px; }
+  .page-head h1 { font-size: 22px; margin: 0; letter-spacing: -.02em; }
+  .page-head p { margin: 2px 0 0; color: var(--muted); }
+  .page-head .tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .section { margin-top: 28px; }
   .section-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 12px; min-height: 34px; }
-  .section-head h2 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -.005em; }
+  .section-head h2 { font-size: 15px; margin: 0; font-weight: 650; }
   .section-head .sub { color: var(--muted); font-size: 13px; }
   .section-head .tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .count { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 999px; background: var(--line); color: var(--ink-2); font-size: 12px; font-weight: 600; text-align: center; line-height: 20px; }
+  .count { display: inline-block; min-width: 22px; padding: 0 7px; border-radius: 999px; background: var(--line); color: var(--text); font-size: 12px; font-weight: 600; text-align: center; line-height: 20px; }
   .count.bad { background: var(--bad-soft); color: var(--bad); }
 
-  .seg { display: inline-flex; padding: 3px; background: var(--soft); border: 1px solid var(--line); border-radius: 9px; gap: 2px; }
-  .seg button { border: 0; background: transparent; padding: 5px 11px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 13px; }
+  .seg { display: inline-flex; padding: 3px; background: var(--soft); border: 1px solid var(--line); border-radius: 10px; gap: 2px; }
+  .seg button { border: 0; background: transparent; padding: 5px 12px; border-radius: 8px; cursor: pointer; color: var(--muted); font-size: 13px; }
   .seg button.on { background: var(--panel); color: var(--text); box-shadow: var(--shadow); }
 
-  /* time range: the main control of the page */
   .range { display: inline-flex; padding: 4px; gap: 4px; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 11px; box-shadow: var(--shadow); }
-  .range button { border: 0; background: transparent; padding: 8px 16px; border-radius: 8px; cursor: pointer; color: var(--ink-2); font-size: 14px; font-weight: 550; }
+  .range button { border: 0; background: transparent; padding: 7px 14px; border-radius: 8px; cursor: pointer; color: var(--text); font-size: 13.5px; font-weight: 550; }
   .range button:hover { background: var(--soft); }
-  .range button.on { background: var(--ink); color: #fff; }
+  .range button.on { background: var(--accent); color: #fff; }
 
   .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(185px, 1fr)); }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
   .kpi { padding: 15px 16px; }
   .kpi .label { color: var(--muted); font-size: 12.5px; font-weight: 500; }
-  .kpi .value { font-size: 27px; font-weight: 650; letter-spacing: -.025em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .kpi .value { font-size: 26px; font-weight: 650; letter-spacing: -.025em; margin-top: 2px; font-variant-numeric: tabular-nums; }
   .kpi .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
-  .meter { height: 4px; background: var(--soft); border-radius: 2px; margin-top: 9px; overflow: hidden; }
-  .meter span { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+  .meter { height: 5px; background: var(--soft); border-radius: 3px; margin-top: 9px; overflow: hidden; }
+  .meter span { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .4s; }
 
   .breakdowns { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
   .bars { padding: 14px 16px; }
@@ -86,11 +103,10 @@
   .bars .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
   .bars .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 13px; }
   .bars .bar { grid-column: 1 / -1; height: 5px; background: var(--soft); border-radius: 3px; overflow: hidden; }
-  .bars .bar span { display: block; height: 100%; background: linear-gradient(90deg, #6366f1, #4f46e5); border-radius: 3px; }
+  .bars .bar span { display: block; height: 100%; background: linear-gradient(90deg, #94a3b8, #334155); border-radius: 3px; }
   .bars .row.click { cursor: pointer; }
   .bars .row.click:hover .name { color: var(--accent); }
 
-  /* collapsible panels */
   .panel { overflow: hidden; }
   .panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; padding: 12px 16px; }
   .toggle { display: inline-flex; align-items: center; gap: 10px; border: 0; background: none; cursor: pointer; padding: 2px 0; font-size: 15px; font-weight: 650; color: var(--text); }
@@ -98,7 +114,6 @@
   .panel.collapsed .toggle .chev { transform: rotate(-90deg); }
   .panel.collapsed .panel-body { display: none; }
   .panel-head .tools { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .panel.collapsed .panel-head .tools { display: none; }
   .panel-body { border-top: 1px solid var(--line); }
   .pager { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel-2); color: var(--muted); font-size: 13px; }
 
@@ -108,9 +123,9 @@
   th { font-size: 11.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; background: var(--panel-2); }
   tr:last-child td { border-bottom: 0; }
   tbody tr.click { cursor: pointer; }
-  tbody tr.click:hover td { background: #f6f8fb; }
+  tbody tr.click:hover td { background: var(--hover); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td.src { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  td.src { max-width: 300px; overflow: hidden; text-overflow: ellipsis; }
   td.wrap { white-space: normal; min-width: 240px; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 550; background: var(--soft); color: var(--muted); }
   .pill.ok { background: var(--ok-soft); color: var(--ok); }
@@ -118,70 +133,116 @@
   .pill.warn { background: var(--warn-soft); color: var(--warn); }
   .pill.run { background: var(--accent-soft); color: var(--accent-ink); }
   .pill.run::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
-  .tag { display: inline-block; padding: 1px 7px; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); max-width: 200px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 6px; background: var(--soft); border: 1px solid var(--line); font-size: 12px; color: var(--text); max-width: 220px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 12.5px; border: 1px solid var(--accent-line); }
+  .chip.plain { background: var(--soft); color: var(--text); border-color: var(--line); }
   .fmt { display: inline-block; padding: 1px 7px; border-radius: 6px; background: var(--ink-2); color: #e2e8f0; font-family: var(--mono); font-size: 11.5px; text-transform: lowercase; }
-  .empty { padding: 28px; text-align: center; color: var(--muted); }
-  .filters select, .filters input { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px; padding: 6px 10px; font-size: 13px; }
-  .filters input:focus, .filters select:focus { outline: 3px solid var(--accent-soft); border-color: #a5b4fc; }
-
+  .empty { padding: 34px 20px; text-align: center; color: var(--muted); }
+  .empty b { display: block; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+  .filters select, .filters input { border: 1px solid var(--line-strong); background: var(--panel); border-radius: 9px; padding: 6px 10px; font-size: 13px; }
+  .filters input:focus, .filters select:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent-line); }
   .foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-top: 36px; padding-top: 18px; border-top: 1px solid var(--line-strong); font-size: 13px; }
 
-  /* new request panel */
-  #newPanel { padding: 20px; margin-bottom: 8px; }
-  #newPanel .head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 18px; }
-  #newPanel .head h2 { font-size: 16px; margin: 0; }
-  .form { display: grid; gap: 14px 16px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+  /* new request */
+  .modes { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 18px; }
+  .mode { text-align: left; padding: 16px 18px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); cursor: pointer; box-shadow: var(--shadow); display: grid; grid-template-columns: 38px 1fr; gap: 2px 12px; }
+  .mode:hover { border-color: var(--accent-line); }
+  .mode.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .mode .ic { grid-row: span 2; width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-ink); font-size: 18px; }
+  .mode b { font-size: 14.5px; }
+  .mode span { color: var(--muted); font-size: 13px; }
+  .formcard { padding: 6px 22px 22px; }
+  .group { padding: 18px 0; border-bottom: 1px solid var(--line); }
+  .group:last-of-type { border-bottom: 0; }
+  .group > h3 { margin: 0 0 3px; font-size: 14px; }
+  .group > p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .form { display: grid; gap: 14px 16px; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
   .form .full { grid-column: 1 / -1; }
   .field label { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
-  .field input[type=text], .field input[type=number], .field input[type=password], .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 8px; padding: 8px 10px; }
-  .field textarea { min-height: 140px; font-family: var(--mono); font-size: 12.5px; resize: vertical; }
-  .field input:focus, .field select:focus, .field textarea:focus { outline: 3px solid var(--accent-soft); border-color: #a5b4fc; }
-  .checks { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
-  .checks label { display: inline-flex; gap: 6px; align-items: center; color: var(--text); font-size: 13.5px; margin: 0; font-weight: 400; }
-  details.adv { grid-column: 1 / -1; border-top: 1px dashed var(--line-strong); padding-top: 12px; }
-  details.adv summary { cursor: pointer; color: var(--muted); font-size: 13px; }
-  details.adv .form { margin-top: 12px; }
-  .actions { display: flex; gap: 12px; align-items: center; margin-top: 18px; }
+  .field input[type=text], .field input[type=number], .field input[type=password], .field input[type=url], .field select, .field textarea { width: 100%; border: 1px solid var(--line-strong); background: var(--panel); border-radius: 9px; padding: 8px 11px; }
+  .field input.big { padding: 11px 13px; font-size: 15px; }
+  .field textarea { min-height: 120px; font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+  .field textarea.short { min-height: 70px; }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: 3px solid var(--accent-soft); border-color: var(--accent-line); }
+  .field .help { color: var(--faint); font-size: 12px; margin-top: 4px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 10px; }
+  .check { display: inline-flex; gap: 8px; align-items: center; padding: 7px 12px; border: 1px solid var(--line-strong); border-radius: 10px; cursor: pointer; font-size: 13.5px; background: var(--panel); }
+  .check:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink); }
+  .check input { accent-color: var(--accent); margin: 0; }
+  details.more { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 4px; }
+  details.more > summary { cursor: pointer; color: var(--text); font-weight: 600; font-size: 13.5px; list-style: none; display: flex; align-items: center; gap: 8px; }
+  details.more > summary::before { content: "▸"; color: var(--muted); transition: transform .15s; }
+  details.more[open] > summary::before { transform: rotate(90deg); }
+  details.more > summary span { color: var(--muted); font-weight: 400; }
+  details.more .inner { margin-top: 14px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding-top: 18px; }
   .hint { color: var(--muted); font-size: 13px; }
   .error { color: var(--bad); }
-  #output { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 18px; }
-  .out-head { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-bottom: 10px; }
-  .out-title { font-size: 17px; font-weight: 650; }
-  .out-summary { color: var(--ink-2); margin: 0 0 12px; max-width: 900px; }
-  .facts { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 13px; }
-  .facts b { color: var(--text); font-weight: 550; }
-  pre.view { background: var(--ink); color: var(--ink-text); padding: 16px 18px; border-radius: 10px; overflow: auto; max-height: 520px; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; margin: 0; }
+
+  /* results */
+  #output { margin-top: 18px; padding: 20px 22px; }
+  .out-head { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; margin-bottom: 8px; }
+  .out-title { font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
+  .out-summary { color: var(--text); margin: 0 0 14px; max-width: 920px; font-size: 14.5px; }
+  .facts { display: flex; flex-wrap: wrap; gap: 6px 20px; color: var(--muted); font-size: 13px; }
+  .facts b { color: var(--text); font-weight: 600; }
+  .searchbox { display: grid; gap: 12px; margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel-2); }
+  .searchbox h4, #drawer .searchbox h4 { margin: 0 0 6px; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .searchbox ul { margin: 0; padding-left: 18px; }
+  pre.view { border: 1px solid var(--line); background: var(--code-bg); color: var(--code-text); padding: 16px 18px; border-radius: 12px; overflow: auto; max-height: 560px; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; margin: 0; }
   .chunk { border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; }
   .chunk .ch { display: flex; flex-wrap: wrap; gap: 12px; padding: 8px 12px; background: var(--panel-2); border-bottom: 1px solid var(--line); border-radius: 10px 10px 0 0; font-size: 12.5px; color: var(--muted); }
   .chunk pre { margin: 0; padding: 10px 12px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; }
+  .progress { margin-top: 12px; }
+  .progress .nums { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .progress .nums b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .progress .meter { height: 8px; }
+  .files { display: grid; grid-template-columns: 120px 1fr; gap: 6px 14px; margin-top: 14px; font-size: 13px; }
+  .files dt { color: var(--muted); } .files dd { margin: 0; word-break: break-all; font-family: var(--mono); font-size: 12.5px; }
+
+  /* sites */
+  .crawls { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .crawl { padding: 16px 18px; }
+  .crawl .t { display: flex; align-items: center; gap: 10px; }
+  .crawl .t b { font-size: 15px; }
+  .crumb { color: var(--muted); font-size: 13px; }
+  .crumb a { color: var(--muted); }
+  .crumb a:hover { color: var(--accent); }
 
   /* login */
-  .login-wrap { min-height: 100vh; display: grid; place-items: center; background: radial-gradient(1200px 500px at 50% -10%, #1e293b, var(--ink)); }
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; background: radial-gradient(1200px 500px at 50% -10%, #ffffff, #e2e8f0); }
   #login { width: min(400px, calc(100% - 32px)); padding: 28px; }
   #login h1 { font-size: 18px; margin: 16px 0 4px; }
   #login .brand { color: var(--text); }
-  #login input { width: 100%; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; margin: 16px 0 12px; }
+  #login input { width: 100%; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 9px; margin: 16px 0 12px; background: var(--panel); }
 
   /* drawer */
-  #scrim { position: fixed; inset: 0; background: rgba(15,23,42,.35); z-index: 5; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  #scrim { position: fixed; inset: 0; background: rgba(15,23,42,.4); z-index: 5; opacity: 0; pointer-events: none; transition: opacity .2s; }
   #scrim.open { opacity: 1; pointer-events: auto; }
-  #drawer { position: fixed; top: 0; right: 0; width: min(700px, 100%); height: 100%; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -16px 0 40px rgba(15,23,42,.18); transform: translateX(100%); transition: transform .22s ease; overflow-y: auto; z-index: 6; padding: 24px 28px; }
+  #drawer { position: fixed; top: 0; right: 0; width: min(760px, 100%); height: 100%; background: var(--panel); border-left: 1px solid var(--line); box-shadow: -16px 0 40px rgba(15,23,42,.18); transform: translateX(100%); transition: transform .22s ease; overflow-y: auto; z-index: 6; padding: 24px 28px; }
   #drawer.open { transform: none; }
   #drawer h3 { margin: 0; font-size: 18px; }
   #drawer h4 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 26px 0 10px; }
-  dl { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin: 18px 0 0; font-size: 13.5px; }
-  dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
-  #drawer pre { background: var(--panel-2); border: 1px solid var(--line); padding: 12px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 12px; margin: 0; }
+  dl.kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin: 18px 0 0; font-size: 13.5px; }
+  dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; word-break: break-all; }
+  #drawer pre:not(.view) { background: var(--panel-2); border: 1px solid var(--line); padding: 12px; border-radius: 8px; overflow-x: auto; font-family: var(--mono); font-size: 12px; margin: 0; }
   #drawer .card { box-shadow: none; }
   #drawer th, #drawer td { padding: 8px 10px; font-size: 13px; }
 
-  @media (max-width: 760px) {
-    .top { padding: 0 16px; gap: 10px; }
-    .top nav, #updated, .live .lbl { display: none; }
-    main { padding: 16px 16px 56px; }
+  @media (max-width: 860px) {
+    #app { grid-template-columns: 1fr; }
+    .side { height: auto; flex-direction: row; flex-wrap: wrap; align-items: center; padding: 10px 14px; gap: 8px; border-right: 0; border-bottom: 1px solid var(--line); }
+    .brand { padding: 0; }
+    .brand span, .nav .label, .nav a .t, #updated, .live .lbl, .side .bottom .link { display: none; }
+    .nav { flex-direction: row; margin: 0; }
+    .nav a.on { box-shadow: none; }
+    .side .bottom { margin: 0 0 0 auto; flex-direction: row; padding: 0; border: 0; }
+    .side .newbtn { order: 9; padding: 6px 12px; }
+    main { padding: 18px 16px 56px; }
     .range button { padding: 7px 10px; font-size: 13px; }
     #drawer { padding: 20px 16px; }
-    dl { grid-template-columns: 110px 1fr; }
+    dl.kv, .files { grid-template-columns: 105px 1fr; }
   }
 </style>
 </head>
@@ -189,7 +250,7 @@
 
 <div class="login-wrap hidden" id="loginWrap">
   <div id="login" class="card">
-    <span class="brand"><i></i>DOCVISION-LLM</span>
+    <span class="brand"><i></i>DOCVISIONLLM</span>
     <h1>Dashboard</h1>
     <div class="muted">Enter the access token (<code>DOCVISION_TOKEN</code>). It is kept only in this browser tab.</div>
     <form id="loginForm">
@@ -197,173 +258,286 @@
       <button class="btn primary" type="submit">Open dashboard</button>
       <div class="error" id="loginError" style="margin-top:10px"></div>
     </form>
-    <div class="hint" style="margin-top:18px"><a href="/_/doc" style="color:var(--accent);text-decoration:none">Read the docs →</a></div>
+    <div class="hint" style="margin-top:18px"><a href="/_/doc" target="_blank" rel="noopener">Read the docs ↗</a></div>
   </div>
 </div>
 
 <div id="app" class="hidden">
-  <header class="top">
-    <a class="brand" href="/_/dashboard"><i></i>DOCVISION-LLM</a>
-    <nav><a class="on" href="/_/dashboard">Dashboard</a><a href="/_/doc">Docs</a></nav>
-    <span class="spacer"></span>
-    <button class="live" id="liveBadge" title="Requests queued or running"><span class="dot"></span><b id="liveCount">0</b><span class="lbl">in progress</span></button>
-    <span id="updated"></span>
-    <button class="btn primary" id="newBtn">New request</button>
-    <button class="link" id="logout">Sign out</button>
-  </header>
+  <aside class="side">
+    <a class="brand" href="#overview"><i></i><span>DOCVISIONLLM</span></a>
+    <a class="btn newbtn" href="#new" id="newBtn">＋ New request</a>
+    <nav class="nav" id="tabs">
+      <div class="label">Monitor</div>
+      <a href="#overview" data-v="overview"><span class="i">◎</span><span class="t">Overview</span></a>
+      <a href="#requests" data-v="requests"><span class="i">☰</span><span class="t">Requests</span></a>
+      <div class="label">Crawling</div>
+      <a href="#sites" data-v="sites"><span class="i">◫</span><span class="t">Sites</span></a>
+      <div class="label">Run</div>
+      <a href="#new" data-v="new"><span class="i">＋</span><span class="t">New request</span></a>
+      <a href="/_/doc" target="_blank" rel="noopener"><span class="i">?</span><span class="t">Docs</span><span class="ext">↗</span></a>
+    </nav>
+    <div class="bottom">
+      <button class="live" id="liveBadge" title="Requests queued or running"><span class="dot"></span><b id="liveCount">0</b><span class="lbl">in progress</span></button>
+      <span id="updated"></span>
+      <button class="link" id="logout">Sign out</button>
+    </div>
+  </aside>
 
   <main>
-    <section id="newPanel" class="card hidden">
-      <div class="head">
-        <h2>New request</h2>
-        <div class="seg" id="opTabs"><button data-op="convert" class="on">Convert</button><button data-op="summarize">Title &amp; summary</button><button data-op="chunk">Chunk</button><button data-op="extract">Extract JSON</button></div>
-        <span class="spacer"></span>
-        <button class="link" id="closeNew">Close ✕</button>
+    <!-- ================= Overview ================= -->
+    <div data-view="overview">
+      <div class="page-head">
+        <div><h1>Overview</h1><p id="llm"></p></div>
+      </div>
+      <div class="grid" id="live"></div>
+
+      <div class="section hidden" id="progressSection">
+        <div class="section-head"><h2>In progress</h2><span class="count" id="progressCount">0</span></div>
+        <div class="card tablewrap" id="progress"></div>
       </div>
 
-      <form id="form" autocomplete="off">
-        <div class="form">
-          <div class="field full" data-for="convert">
-            <label for="f_source">Source</label>
-            <input type="text" id="f_source" placeholder="/absolute/path/report.pdf, https://… or s3://bucket/key">
-          </div>
-          <div class="field full" data-for="summarize chunk extract">
-            <label for="f_text">Text or Markdown</label>
-            <textarea id="f_text" placeholder="Paste text here, or leave empty and give a source below."></textarea>
-          </div>
-          <div class="field full" data-for="summarize chunk extract">
-            <label for="f_tsource">…or a text / Markdown source</label>
-            <input type="text" id="f_tsource" placeholder="/path/notes.md or https://…">
-          </div>
-          <div class="field full" data-for="convert extract">
-            <label for="f_schema">JSON Schema for structured data <span data-for="convert">(optional)</span> · <button type="button" class="link" id="exampleSchema" style="padding:0;color:var(--accent)">use receipt example</button></label>
-            <textarea id="f_schema" style="min-height:110px" placeholder='{"type": "object", "properties": {"total": {"type": "number"}}, "required": ["total"]}'></textarea>
-          </div>
-          <div class="field">
-            <label for="f_requester">Requester ID</label>
-            <input type="text" id="f_requester" placeholder="unknown">
-          </div>
-          <div class="field" data-for="convert">
-            <label for="f_exec">Execution</label>
-            <select id="f_exec"><option value="sync">Sync (wait here)</option><option value="async">Async (background job)</option></select>
-          </div>
-          <div class="field" data-for="convert">
-            <label for="f_ocr">PDF / image OCR</label>
-            <select id="f_ocr"><option value="on">on (LLM)</option><option value="auto">auto</option><option value="off">off (native text)</option></select>
-          </div>
-          <div class="field" data-for="convert">
-            <label for="f_cache">Cache</label>
-            <select id="f_cache"><option value="use">use</option><option value="bypass">bypass</option><option value="refresh">refresh</option></select>
-          </div>
-          <div class="field" data-for="convert summarize">
-            <label for="f_tmethod">Title method</label>
-            <select id="f_tmethod"><option value="llm">llm</option><option value="local">local</option></select>
-          </div>
-          <div class="field" data-for="convert summarize">
-            <label for="f_smethod">Summary method</label>
-            <select id="f_smethod"><option value="llm">llm</option><option value="local">local</option></select>
-          </div>
-          <div class="field" data-for="convert chunk">
-            <label for="f_csize">Chunk size (tokens)</label>
-            <input type="number" id="f_csize" min="1" placeholder="512">
-          </div>
-          <div class="field" data-for="convert chunk">
-            <label for="f_coverlap">Chunk overlap (tokens)</label>
-            <input type="number" id="f_coverlap" min="0" placeholder="15% of size">
-          </div>
-          <div class="field full" data-for="convert summarize">
-            <div class="checks">
-              <label><input type="checkbox" id="f_gtitle" checked> Title</label>
-              <label><input type="checkbox" id="f_gsummary" checked> Summary</label>
-              <label data-for="convert"><input type="checkbox" id="f_gchunks" checked> Chunks</label>
-              <label data-for="convert"><input type="checkbox" id="f_partial"> Allow partial</label>
-              <label data-for="convert"><input type="checkbox" id="f_images"> Extract images</label>
-              <label data-for="convert" title="A zip with the Markdown, summary.md and the images (runs async)"><input type="checkbox" id="f_zip"> Create zip</label>
-              <label data-for="convert" title="Write only the zip and the JSON result to the destination"><input type="checkbox" id="f_ziponly"> Zip only</label>
-            </div>
-          </div>
-          <details class="adv" data-for="convert summarize extract">
-            <summary>LLM override<span data-for="convert"> and destination</span></summary>
-            <div class="form">
-              <div class="field"><label for="f_provider">Provider</label><input type="text" id="f_provider" placeholder="default (openai, gemini, anthropic, …)"></div>
-              <div class="field"><label for="f_model">Model</label><input type="text" id="f_model" placeholder="default"></div>
-              <div class="field"><label for="f_key">API key</label><input type="password" id="f_key" placeholder="default"></div>
-              <div class="field"><label for="f_base">Base URL</label><input type="text" id="f_base" placeholder="default"></div>
-              <div class="field full" data-for="convert"><label for="f_dest">Destination: a folder ending in / or a .md file (runs as a background job)</label><input type="text" id="f_dest" placeholder="s3://bucket/out/  or  /out/report.md"></div>
-            </div>
-          </details>
+      <div class="section">
+        <div class="section-head">
+          <h2>Activity</h2><span class="sub" id="windowLabel"></span>
+          <div class="tools"><div class="range" id="windows" role="tablist" aria-label="Time range"><button data-w="1h">1 hour</button><button data-w="24h" class="on">24 hours</button><button data-w="7d">7 days</button><button data-w="30d">30 days</button></div></div>
         </div>
+        <div class="grid" id="overview"></div>
+      </div>
+
+      <div class="section">
+        <div class="section-head"><h2>Breakdown</h2><span class="sub">click a requester or format to see its requests</span></div>
+        <div class="breakdowns">
+          <div class="card bars" id="byRequester"></div>
+          <div class="card bars" id="byFormat"></div>
+          <div class="card bars" id="byOperation"></div>
+          <div class="card bars" id="byModel"></div>
+          <div class="card bars" id="byStatus"></div>
+        </div>
+      </div>
+
+      <footer class="foot hidden" id="dbFooter">
+        <span class="muted">Database: SQLite. The download is a full snapshot of jobs and request history; stored secrets stay encrypted.</span>
+        <span class="spacer"></span>
+        <span class="hint" id="dbStatus"></span>
+        <button class="btn" id="dbDownload" type="button">Download database</button>
+      </footer>
+    </div>
+
+    <!-- ================= Requests ================= -->
+    <div data-view="requests" class="hidden">
+      <div class="page-head">
+        <div><h1>Requests</h1><p>Every conversion, crawl and text operation, newest first. Click a row for its details.</p></div>
+      </div>
+      <section class="card panel" id="requestsPanel" data-key="requests" data-default="open">
+        <div class="panel-head">
+          <div class="row-flex filters" style="width:100%">
+            <input type="text" id="fltRequester" placeholder="Requester ID" list="requesters" style="width:170px">
+            <datalist id="requesters"></datalist>
+            <select id="fltOperation"><option value="">All operations</option><option>convert</option><option>crawl</option><option>summarize</option><option>chunk</option><option>extract</option></select>
+            <select id="fltFormat"><option value="">All formats</option><option>pdf</option><option>docx</option><option>xlsx</option><option>pptx</option><option>html</option><option>markdown</option><option>text</option><option>png</option><option>jpeg</option><option>webp</option><option>odt</option><option>ods</option><option>odp</option><option>epub</option></select>
+            <select id="fltStatus"><option value="">Any status</option><option>completed</option><option>partial</option><option>failed</option><option>queued</option><option>running</option><option>limit_reached</option><option>cancelled</option></select>
+            <button class="link" id="clearFilters" type="button">Clear</button>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="tablewrap" id="recent"></div>
+          <div class="pager" id="recentPager"></div>
+        </div>
+      </section>
+
+      <section class="section card panel" id="failuresPanel" data-key="failures" data-default="collapsed">
+        <div class="panel-head">
+          <button class="toggle" type="button"><span class="chev">▼</span>Recent failures <span class="count" id="failCount">0</span></button>
+        </div>
+        <div class="panel-body">
+          <div class="tablewrap" id="failures"></div>
+          <div class="pager" id="failuresPager"></div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ================= Sites ================= -->
+    <div data-view="sites" class="hidden">
+      <div id="sitesList">
+        <div class="page-head">
+          <div><h1>Sites</h1><p>Websites crawled into the crawl store. Each site keeps the latest version of every page.</p></div>
+          <div class="tools"><button class="btn" id="reindexAll" type="button" title="Rebuild the index from the crawl store">Reindex</button><a class="btn primary" href="#new/crawl">＋ Crawl a site</a></div>
+        </div>
+        <div class="section hidden" id="crawlsSection" style="margin-top:0">
+          <div class="section-head"><h2>Running crawls</h2></div>
+          <div class="crawls" id="crawls"></div>
+        </div>
+        <div class="section">
+          <div class="card tablewrap" id="sitesTable"></div>
+          <div class="hint" id="sitesStatus" style="margin-top:10px"></div>
+        </div>
+      </div>
+
+      <div id="siteDetail" class="hidden">
+        <div class="crumb"><a href="#sites">Sites</a> ›</div>
+        <div class="page-head" style="margin-top:4px">
+          <div><h1 id="siteName"></h1><p id="siteSub"></p><p class="mono muted" id="siteFile" style="font-size:12px;word-break:break-all"></p></div>
+          <div class="tools"><button class="btn" id="siteReindex" type="button">Reindex</button><button class="btn primary" id="siteCrawl" type="button">Crawl again</button></div>
+        </div>
+        <section class="card panel">
+          <div class="panel-head">
+            <div class="row-flex filters" style="width:100%">
+              <input type="text" id="pgPrefix" placeholder="URL starts with…" style="width:280px">
+              <select id="pgStatus"><option value="">Any status</option><option>completed</option><option>partial</option><option>failed</option><option>gone</option></select>
+            </div>
+          </div>
+          <div class="panel-body">
+            <div class="tablewrap" id="pagesTable"></div>
+            <div class="pager" id="pagesPager"></div>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- ================= New ================= -->
+    <div data-view="new" class="hidden">
+      <div class="page-head"><div><h1>New request</h1><p>Choose what to do, fill in the source, and adjust only what you need: the defaults are sensible.</p></div></div>
+      <div class="modes" id="modes">
+        <button type="button" class="mode" data-mode="convert"><span class="ic">⇩</span><b>Convert a document or page</b><span>PDF, Office, HTML, images or a web page → Markdown and data</span></button>
+        <button type="button" class="mode" data-mode="crawl"><span class="ic">⌘</span><b>Crawl a website</b><span>Follow a site's links and convert every page in the background</span></button>
+        <button type="button" class="mode" data-mode="text"><span class="ic">¶</span><b>Work with text</b><span>Title and summary, chunks, or structured JSON from text</span></button>
+      </div>
+
+      <form id="form" class="card formcard" autocomplete="off">
+        <div class="group" data-for="summarize chunk extract" style="padding-bottom:0;border:0">
+          <div class="seg" id="textOps"><button type="button" data-op="summarize" class="on">Title &amp; summary</button><button type="button" data-op="chunk">Chunks</button><button type="button" data-op="extract">Structured JSON</button></div>
+        </div>
+
+        <div class="group">
+          <h3 id="srcTitle">Source</h3>
+          <p id="srcHelp"></p>
+          <div class="form">
+            <div class="field full" data-for="convert">
+              <input type="text" class="big" id="f_source" placeholder="https://example.com/report.pdf, /absolute/path/file.docx or s3://bucket/key">
+            </div>
+            <div class="field full" data-for="crawl">
+              <input type="text" class="big" id="f_start" placeholder="https://docs.example.com/">
+            </div>
+            <div class="field" data-for="crawl">
+              <label for="f_site">Site name</label>
+              <input type="text" id="f_site" placeholder="the start URL's host">
+              <div class="help">Where the pages are kept; crawling the same name again updates it.</div>
+            </div>
+            <div class="field full" data-for="summarize chunk extract">
+              <textarea id="f_text" placeholder="Paste text or Markdown here, or leave empty and give a source below."></textarea>
+            </div>
+            <div class="field full" data-for="summarize chunk extract">
+              <input type="text" id="f_tsource" placeholder="…or a text / Markdown file: /path/notes.md or https://…">
+            </div>
+          </div>
+        </div>
+
+        <div class="group" data-for="crawl">
+          <h3>What to crawl</h3>
+          <p>Links are followed from the start URL, within these limits. robots.txt and the site's sitemap are used by default.</p>
+          <div class="form">
+            <div class="field"><label for="f_maxpages">Max pages</label><input type="number" id="f_maxpages" min="1" max="10000" placeholder="100"></div>
+            <div class="field"><label for="f_maxdepth">Max link depth</label><input type="number" id="f_maxdepth" min="0" max="50" placeholder="3"></div>
+            <div class="field"><label for="f_include">Only these paths</label><textarea class="short" id="f_include" placeholder="/docs/*&#10;/guide/*"></textarea><div class="help">One pattern per line; * matches anything.</div></div>
+            <div class="field"><label for="f_exclude">Skip these paths</label><textarea class="short" id="f_exclude" placeholder="*/tag/*&#10;*?page=*"></textarea></div>
+            <div class="field full">
+              <div class="checks">
+                <label class="check"><input type="checkbox" id="f_samesite" checked> Stay on this site</label>
+                <label class="check"><input type="checkbox" id="f_sitemap" checked> Use the sitemap</label>
+                <label class="check"><input type="checkbox" id="f_robots" checked> Respect robots.txt</label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="group" data-for="convert crawl summarize">
+          <h3>What to produce</h3>
+          <p>Title, summary, language and search terms come from one LLM call. The Markdown is always produced.</p>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="f_gtitle" checked> Title</label>
+            <label class="check"><input type="checkbox" id="f_gsummary" checked> Summary</label>
+            <label class="check" data-for="convert crawl"><input type="checkbox" id="f_glang" checked> Language</label>
+            <label class="check" data-for="convert crawl" title="Keywords, entities and questions for finding the document"><input type="checkbox" id="f_gsearch" checked> Search terms</label>
+            <label class="check" data-for="convert crawl"><input type="checkbox" id="f_gchunks"> Chunks</label>
+            <label class="check" data-for="convert crawl"><input type="checkbox" id="f_images"> Extract images</label>
+          </div>
+        </div>
+
+        <div class="group" data-for="chunk">
+          <h3>Chunking</h3>
+          <div class="form">
+            <div class="field"><label for="f_csize">Chunk size (tokens)</label><input type="number" id="f_csize" min="1" placeholder="512"></div>
+            <div class="field"><label for="f_coverlap">Overlap (tokens)</label><input type="number" id="f_coverlap" min="0" placeholder="15% of size"></div>
+          </div>
+        </div>
+
+        <div class="group" data-for="extract">
+          <h3>JSON Schema</h3>
+          <p>The answer follows this schema. <button type="button" class="link exampleSchema" style="padding:0;color:var(--accent)">Use a receipt example</button></p>
+          <div class="field"><textarea id="f_schema_x" placeholder='{"type": "object", "properties": {"total": {"type": "number"}}, "required": ["total"]}'></textarea></div>
+        </div>
+
+        <details class="more" data-for="convert crawl">
+          <summary>Structured data <span>· pull fields out of every document with a JSON Schema</span></summary>
+          <div class="inner field">
+            <p class="hint" style="margin-top:0"><button type="button" class="link exampleSchema" style="padding:0;color:var(--accent)">Use a receipt example</button></p>
+            <textarea id="f_schema" placeholder='{"type": "object", "properties": {"total": {"type": "number"}}, "required": ["total"]}'></textarea>
+          </div>
+        </details>
+
+        <details class="more" data-for="convert crawl">
+          <summary>Web pages <span>· JavaScript rendering, headers, cookies</span></summary>
+          <div class="inner form">
+            <div class="field"><label for="f_render">Render with the browser</label><select id="f_render"><option value="auto">auto (when the page needs it)</option><option value="on">always</option><option value="off">never</option></select></div>
+            <div class="field"><label for="f_waitfor">Wait for selector</label><input type="text" id="f_waitfor" placeholder="article, .content"></div>
+            <div class="field"><label for="f_waitms">Extra wait (ms)</label><input type="number" id="f_waitms" min="0" max="20000" placeholder="0"></div>
+            <div class="field full"><label for="f_headers">Headers</label><textarea class="short" id="f_headers" placeholder="Authorization: Bearer …&#10;Accept-Language: fr-FR"></textarea><div class="help">One per line. Sent only to the source's own site; never stored in results.</div></div>
+            <div class="field"><label for="f_query">Query parameters</label><textarea class="short" id="f_query" placeholder="lang=fr"></textarea></div>
+            <div class="field"><label for="f_cookies">Cookies</label><textarea class="short" id="f_cookies" placeholder="session=…"></textarea></div>
+            <div class="field"><label for="f_ua">User agent</label><input type="text" id="f_ua" placeholder="docvision/…"></div>
+          </div>
+        </details>
+
+        <details class="more" data-for="convert">
+          <summary>Output and processing <span>· destination, zip, OCR, cache</span></summary>
+          <div class="inner form">
+            <div class="field full"><label for="f_dest">Destination</label><input type="text" id="f_dest" placeholder="s3://bucket/out/  or  /out/report.jsonl"><div class="help">A folder ending in / or a .jsonl file. The result is written as one JSON Lines record (the job runs in the background).</div></div>
+            <div class="field"><label for="f_exec">Run</label><select id="f_exec"><option value="sync">Now (wait here)</option><option value="async">As a background job</option></select></div>
+            <div class="field"><label for="f_ocr">PDF and image OCR</label><select id="f_ocr"><option value="on">on (LLM reads every page)</option><option value="auto">auto (LLM for scanned pages)</option><option value="off">off (native text only)</option></select></div>
+            <div class="field"><label for="f_cache">Cache</label><select id="f_cache"><option value="use">use</option><option value="bypass">bypass</option><option value="refresh">refresh</option></select></div>
+            <div class="field full">
+              <div class="checks">
+                <label class="check" title="A zip with the result and its images (background job)"><input type="checkbox" id="f_zip"> Create a zip</label>
+                <label class="check" title="Write only the zip to the destination"><input type="checkbox" id="f_ziponly"> Zip only</label>
+                <label class="check"><input type="checkbox" id="f_partial"> Accept partial results</label>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details class="more" data-for="convert crawl summarize extract">
+          <summary>Advanced <span>· methods, LLM override, requester, metadata</span></summary>
+          <div class="inner form">
+            <div class="field" data-for="convert crawl summarize"><label for="f_tmethod">Title method</label><select id="f_tmethod"><option value="llm">llm</option><option value="local">local</option></select></div>
+            <div class="field" data-for="convert crawl summarize"><label for="f_smethod">Summary method</label><select id="f_smethod"><option value="llm">llm</option><option value="local">local (extractive)</option></select></div>
+            <div class="field" data-for="convert crawl"><label for="f_lmethod">Language method</label><select id="f_lmethod"><option value="llm">llm</option><option value="local">local</option></select></div>
+            <div class="field" data-for="convert crawl"><label for="f_csize2">Chunk size (tokens)</label><input type="number" id="f_csize2" min="1" placeholder="512"></div>
+            <div class="field"><label for="f_provider">LLM provider</label><input type="text" id="f_provider" placeholder="default (openai, gemini, anthropic, …)"></div>
+            <div class="field"><label for="f_model">Model</label><input type="text" id="f_model" placeholder="default"></div>
+            <div class="field"><label for="f_key">API key</label><input type="password" id="f_key" placeholder="default"></div>
+            <div class="field"><label for="f_base">Base URL</label><input type="text" id="f_base" placeholder="default"></div>
+            <div class="field"><label for="f_requester">Requester ID</label><input type="text" id="f_requester" placeholder="unknown"></div>
+            <div class="field full" data-for="convert crawl"><label for="f_metadata">Metadata (JSON object, returned with every result)</label><textarea class="short" id="f_metadata" placeholder='{"customer": "acme"}'></textarea></div>
+          </div>
+        </details>
+
         <div class="actions">
-          <button class="btn primary" type="submit" id="submitBtn">Convert</button>
+          <button class="btn primary lg" type="submit" id="submitBtn">Convert</button>
           <span class="hint" id="formStatus"></span>
         </div>
       </form>
-      <div id="output" class="hidden"></div>
-    </section>
-
-    <div class="section" style="margin-top:4px">
-      <div class="section-head"><h2>Right now</h2><span class="sub" id="llm"></span></div>
-      <div class="grid" id="live"></div>
+      <div id="output" class="card hidden"></div>
     </div>
-
-    <div class="section hidden" id="progressSection">
-      <div class="section-head"><h2>In progress</h2><span class="count" id="progressCount">0</span></div>
-      <div class="card tablewrap" id="progress"></div>
-    </div>
-
-    <div class="section">
-      <div class="section-head">
-        <h2>Activity</h2><span class="sub" id="windowLabel"></span>
-        <div class="tools"><div class="range" id="windows" role="tablist" aria-label="Time range"><button data-w="1h">1 hour</button><button data-w="24h" class="on">24 hours</button><button data-w="7d">7 days</button><button data-w="30d">30 days</button></div></div>
-      </div>
-      <div class="grid" id="overview"></div>
-    </div>
-
-    <div class="section">
-      <div class="section-head"><h2>Breakdown</h2><span class="sub">click a requester or format to filter requests</span></div>
-      <div class="breakdowns">
-        <div class="card bars" id="byRequester"></div>
-        <div class="card bars" id="byFormat"></div>
-        <div class="card bars" id="byModel"></div>
-        <div class="card bars" id="byStatus"></div>
-        <div class="card bars" id="byOperation"></div>
-      </div>
-    </div>
-
-    <section class="section card panel" id="requestsPanel" data-key="requests" data-default="open">
-      <div class="panel-head">
-        <button class="toggle" type="button"><span class="chev">▼</span>Requests</button>
-        <div class="tools filters">
-          <input type="text" id="fltRequester" placeholder="Requester ID" list="requesters" style="width:160px">
-          <datalist id="requesters"></datalist>
-          <select id="fltOperation"><option value="">All operations</option><option>convert</option><option>summarize</option><option>chunk</option><option>extract</option></select>
-          <select id="fltFormat"><option value="">All formats</option><option>pdf</option><option>docx</option><option>xlsx</option><option>pptx</option><option>html</option><option>markdown</option><option>text</option><option>png</option><option>jpeg</option><option>webp</option><option>odt</option><option>ods</option><option>odp</option><option>epub</option></select>
-          <select id="fltStatus"><option value="">Any status</option><option>completed</option><option>partial</option><option>failed</option><option>queued</option><option>running</option></select>
-          <button class="link" id="clearFilters" type="button">Clear</button>
-        </div>
-      </div>
-      <div class="panel-body">
-        <div class="tablewrap" id="recent"></div>
-        <div class="pager" id="recentPager"></div>
-      </div>
-    </section>
-
-    <section class="section card panel" id="failuresPanel" data-key="failures" data-default="collapsed">
-      <div class="panel-head">
-        <button class="toggle" type="button"><span class="chev">▼</span>Recent failures <span class="count" id="failCount">0</span></button>
-      </div>
-      <div class="panel-body">
-        <div class="tablewrap" id="failures"></div>
-        <div class="pager" id="failuresPager"></div>
-      </div>
-    </section>
-
-    <footer class="foot hidden" id="dbFooter">
-      <span class="muted">Database: SQLite. The download is a full snapshot of jobs and request history; stored secrets stay encrypted.</span>
-      <span class="spacer"></span>
-      <span class="hint" id="dbStatus"></span>
-      <button class="btn" id="dbDownload" type="button">Download database</button>
-    </footer>
   </main>
 </div>
 
@@ -374,7 +548,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const KEY = "docvision.token";
-  let windowSel = "24h", op = "convert", timer = null, busy = false;
+  let windowSel = "24h", op = "convert", textOp = "summarize", view = "overview", siteSel = null, timer = null, busy = false, lastStats = null;
 
   // Per-viewer UI memory (collapsed panels). Storage may be unavailable; the page works without it.
   const store = {
@@ -386,6 +560,7 @@
   function el(tag, attrs = {}, ...children) {
     const e = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs)) {
+      if (v === null || v === undefined) continue;
       if (k === "class") e.className = v; else if (k.startsWith("on")) e[k] = v; else e.setAttribute(k, v);
     }
     for (const c of children) if (c !== null && c !== undefined && c !== false) e.append(c instanceof Node ? c : String(c));
@@ -401,14 +576,15 @@
     if (s < 86400) return Math.round(s / 3600) + "h ago";
     return new Date(iso).toLocaleString();
   };
+  const TERMINAL = ["completed", "partial", "failed", "limit_reached", "cancelled"];
   // Rejected/cancelled/interrupted requests never ran; their execution_status holds a code.
   const shownStatus = (i) => ["rejected", "cancelled", "interrupted"].includes(i.request_status) ? i.request_status : (i.execution_status || i.request_status);
-  const statusClass = (s) => ["completed", "accepted", "delivered", "sent"].includes(s) ? "ok" : ["failed", "rejected", "interrupted"].includes(s) ? "bad" : ["queued", "running"].includes(s) ? "run" : ["partial", "cancelled", "truncated", "rate_limited"].includes(s) ? "warn" : "";
-  const pill = (s) => el("span", { class: "pill " + statusClass(s) }, s || "—");
+  const statusClass = (s) => ["completed", "accepted", "delivered", "sent"].includes(s) ? "ok" : ["failed", "rejected", "interrupted"].includes(s) ? "bad" : ["queued", "running", "cancelling"].includes(s) ? "run" : ["partial", "cancelled", "truncated", "rate_limited", "limit_reached", "gone"].includes(s) ? "warn" : "";
+  const pill = (s) => el("span", { class: "pill " + statusClass(s) }, (s || "—").replace("_", " "));
   const model = (i) => i.llm_model ? el("span", { class: "tag", title: (i.llm_provider || "") + " / " + i.llm_model }, i.llm_model) : el("span", { class: "muted" }, "—");
   const requester = (r) => el("span", { class: "tag" }, r || "unknown");
   const fmt = (f) => f ? el("span", { class: "fmt" }, f) : el("span", { class: "muted" }, "—");
-  // "42 seconds", "12 minutes", "5 h 12 min", "3 days 4 h", "3 months 12 days", "1 year 2 months"
+  const opLabel = (i) => i.operation + (i.execution && i.operation !== "crawl" ? " · " + i.execution : "");
   const uptime = (v) => {
     if (v == null) return "—";
     const s = Math.floor(v / 1000), plural = (n, w) => n + " " + w + (n === 1 ? "" : "s");
@@ -419,7 +595,6 @@
     if (h < 24) return h + " h " + (m % 60) + " min";
     const d = Math.floor(h / 24);
     if (d < 60) return plural(d, "day") + " " + (h % 24) + " h";
-    // Months are counted as 30 days: close enough for an uptime display.
     if (d < 365) return plural(Math.floor(d / 30), "month") + " " + plural(d % 30, "day");
     return plural(Math.floor(d / 365), "year") + " " + plural(Math.floor((d % 365) / 30), "month");
   };
@@ -431,15 +606,14 @@
     while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
     return (v >= 100 ? v.toFixed(0) : v.toFixed(1)) + " " + units[i];
   };
-  // A stored path with its size, or a dash when the file was not written.
   const fileLine = (path, size) => path ? path + (size != null ? "  ·  " + bytes(size) : "") : "—";
-  // Status, plus a marker when the result came from the cache (no LLM work was done).
   const statusCell = (i) => i.cache_hit ? el("span", {}, pill(shownStatus(i)), " ", el("span", { class: "tag", title: "Served from the result cache: no extraction, no LLM calls" }, "cached")) : pill(shownStatus(i));
   const tokens = (u) => u && (u.input_tokens || u.output_tokens) ? num((u.input_tokens || 0) + (u.output_tokens || 0)) : "—";
   const kpi = (label, value, sub, cls, meter) => el("div", { class: "card kpi" },
     el("div", { class: "label" }, label), el("div", { class: "value " + (cls || "") }, value),
     sub ? el("div", { class: "sub" }, sub) : null,
     meter != null ? el("div", { class: "meter" }, el("span", { style: `width:${Math.min(100, meter)}%` })) : null);
+  const pagesOf = (p) => p ? (p.converted || 0) + (p.unchanged || 0) + (p.failed || 0) : 0;
 
   async function rpc(operation, payload = {}, options = {}) {
     const r = await fetch("/rpc", {
@@ -456,6 +630,25 @@
       throw e;
     }
     return body.data;
+  }
+
+  // A file served with the token (zips, run rows), saved through a temporary link.
+  async function download(path, fallbackName, btn) {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Downloading…";
+    try {
+      const r = await fetch(path, { headers: { "X-ACCESS-TOKEN": sessionStorage.getItem(KEY) || "" } });
+      if (r.status === 401) { signOut("Invalid token."); return; }
+      if (!r.ok) throw new Error(await r.text() || "download failed");
+      const name = ((r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/) || [])[1] || fallbackName;
+      const url = URL.createObjectURL(await r.blob());
+      const a = el("a", { href: url, download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      btn.textContent = label;
+    } catch (e) {
+      btn.textContent = "Failed: " + e.message;
+    } finally { btn.disabled = false; }
   }
 
   function bars(container, title, entries, onClick) {
@@ -482,13 +675,13 @@
     container.append(el("table", {}, thead, tbody));
   }
 
-  // ---- collapsible panels ----
   function setupPanel(panel, onOpen) {
     const k = "panel." + panel.dataset.key;
     const saved = store.get(k);
     const collapsed = saved ? saved === "collapsed" : panel.dataset.default === "collapsed";
     panel.classList.toggle("collapsed", collapsed);
-    panel.querySelector(".toggle").onclick = () => {
+    const t = panel.querySelector(".toggle");
+    if (t) t.onclick = () => {
       const now = !panel.classList.contains("collapsed");
       panel.classList.toggle("collapsed", now);
       store.set(k, now ? "collapsed" : "open");
@@ -497,18 +690,13 @@
   }
   const isOpen = (panel) => !panel.classList.contains("collapsed");
 
-  // ---- pagination: history cursors are stable, so a page never shifts while new requests arrive ----
-  function pager(name, render) {
-    return { name, cursors: [null], i: 0, next: null, render };
-  }
-  const pages = {
-    recent: pager("recent", renderRecent),
-    failures: pager("failures", renderFailures),
-  };
+  // ---- history pagination: cursors are stable, so a page never shifts while new requests arrive ----
+  const pager = (render) => ({ cursors: [null], i: 0, next: null, render });
+  const pages = { recent: pager(renderRecent), failures: pager(renderFailures) };
   function resetPage(p) { p.cursors = [null]; p.i = 0; p.next = null; }
-  function drawPager(p, container, count) {
-    const newer = el("button", { class: "btn sm", type: "button", onclick: () => { p.i--; loadPage(p); } }, "‹ Newer");
-    const older = el("button", { class: "btn sm", type: "button", onclick: () => { p.cursors[p.i + 1] = p.next; p.i++; loadPage(p); } }, "Older ›");
+  function drawPager(p, container, count, load) {
+    const newer = el("button", { class: "btn sm", type: "button", onclick: () => { p.i--; load(p); } }, "‹ Newer");
+    const older = el("button", { class: "btn sm", type: "button", onclick: () => { p.cursors[p.i + 1] = p.next; p.i++; load(p); } }, "Older ›");
     newer.disabled = p.i === 0;
     older.disabled = !p.next;
     container.replaceChildren(el("span", {}, "Page " + (p.i + 1) + (count ? " · " + count + " shown" : "")), el("span", { class: "spacer" }), newer, older);
@@ -523,7 +711,7 @@
     }
   }
 
-  // ---- dashboard ----
+  // ================= Overview =================
   function renderStats(s) {
     const L = s.live;
     $("llm").textContent = L.default_llm ? "Default LLM · " + L.default_llm : "No default LLM configured";
@@ -549,12 +737,12 @@
       kpi("LLM calls", num(l.calls), l.failed_calls ? num(l.failed_calls) + " failed attempts" : "no failures", l.failed_calls ? "warn" : ""),
       kpi("Tokens", num((l.input_tokens || 0) + (l.output_tokens || 0)), num(l.input_tokens) + " in · " + num(l.output_tokens) + " out"),
     );
-    const focus = () => { $("requestsPanel").classList.remove("collapsed"); $("requestsPanel").scrollIntoView({ behavior: "smooth", block: "start" }); };
-    bars($("byRequester"), "Top requesters", named(r.by_requester), (name) => { $("fltRequester").value = name; filtersChanged(); focus(); });
-    bars($("byFormat"), "By format", sorted(r.by_format), (f) => { $("fltFormat").value = f; filtersChanged(); focus(); });
+    const focus = () => { location.hash = "#requests"; };
+    bars($("byRequester"), "Top requesters", named(r.by_requester), (name) => { $("fltRequester").value = name; resetPage(pages.recent); focus(); });
+    bars($("byFormat"), "By format", sorted(r.by_format), (f) => { $("fltFormat").value = f; resetPage(pages.recent); focus(); });
+    bars($("byOperation"), "By operation", sorted(r.by_operation), (o) => { $("fltOperation").value = o; resetPage(pages.recent); focus(); });
     bars($("byModel"), "Models", named(r.by_model));
     bars($("byStatus"), "By status", sorted(st));
-    bars($("byOperation"), "By operation", sorted(r.by_operation));
     $("requesters").replaceChildren(...(r.by_requester || []).map((x) => el("option", { value: x.name })));
     $("dbFooter").classList.toggle("hidden", L.database !== "sqlite");
     const failed = st.failed || 0;
@@ -562,34 +750,19 @@
     $("failCount").className = "count" + (failed ? " bad" : "");
   }
 
-  const REQ_HEAD = [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Size", "num"], ["Markdown", "num"], ["Model"], ["Status"], ["Duration", "num"], ["Pages", "num"], ["Tokens", "num"]];
-  function renderRecent(items) {
-    table($("recent"), REQ_HEAD, items.map((i) => ({
-      raw: i,
-      cells: [
-        [ago(i.created_at)], [requester(i.requester_id)],
-        [i.operation + (i.execution ? " · " + i.execution : "")],
-        [fmt(i.format || (i.statistics && i.statistics.format))],
-        [i.source || "—", "src"], [bytes(i.src_bytes), "num"], [bytes(i.md_bytes), "num"], [model(i)], [statusCell(i)],
-        [ms(i.timings && i.timings.total_ms), "num"],
-        [i.statistics && i.statistics.original_total_pages != null ? num(i.statistics.original_total_pages) : "—", "num"],
-        [tokens(i.usage), "num"],
-      ],
-    })), openDetail, "No requests match these filters");
-    drawPager(pages.recent, $("recentPager"), items.length);
+  // Running crawls: their progress comes from `job.get`.
+  const crawlProgress = {};
+  async function loadCrawlProgress(items) {
+    await Promise.all(items.filter((i) => i.operation === "crawl" && i.job_id).map(async (i) => {
+      try { crawlProgress[i.job_id] = (await rpc("job.get", { job_id: i.job_id, fields: ["status"] })).progress || null; } catch (_) {}
+    }));
   }
-  function renderFailures(items) {
-    table($("failures"), [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Code"], ["Stage"], ["Message"]], items.map((i) => ({
-      raw: i,
-      cells: [
-        [ago(i.created_at)], [requester(i.requester_id)], [i.operation + (i.execution ? " · " + i.execution : "")],
-        [fmt(i.format)], [i.source || "—", "src"],
-        [el("span", { class: "mono" }, (i.error && i.error.code) || "—")], [(i.error && i.error.stage) || "—"],
-        [(i.error && i.error.message) || "", "wrap"],
-      ],
-    })), openDetail, "No failures");
-    drawPager(pages.failures, $("failuresPager"), items.length);
-  }
+  const progressText = (i) => {
+    const p = crawlProgress[i.job_id];
+    if (i.operation !== "crawl") return i.execution_stage || "—";
+    if (!p) return "starting";
+    return num(pagesOf(p.pages)) + " pages · " + num(p.pages.queued) + " queued";
+  };
 
   function renderProgress(items) {
     const n = items.length, label = n >= 100 ? "100+" : String(n);
@@ -597,11 +770,41 @@
     $("liveBadge").classList.toggle("active", n > 0);
     $("progressSection").classList.toggle("hidden", n === 0);
     $("progressCount").textContent = label;
-    table($("progress"), [["Started"], ["Requester"], ["Operation"], ["Source"], ["Status"], ["Stage"], ["Job"]],
-      items.map((i) => ({ raw: i, cells: [[ago(i.created_at)], [requester(i.requester_id)], [i.operation + (i.execution ? " · " + i.execution : "")], [i.source || "—", "src"], [pill(shownStatus(i))], [i.execution_stage || "—"], [el("span", { class: "mono" }, i.job_id ? i.job_id.slice(0, 13) + "…" : "—")]] })),
+    table($("progress"), [["Started"], ["Requester"], ["Operation"], ["Source"], ["Status"], ["Progress"]],
+      items.map((i) => ({ raw: i, cells: [[ago(i.created_at)], [requester(i.requester_id)], [opLabel(i)], [i.source || "—", "src"], [pill(shownStatus(i))], [progressText(i)]] })),
       openDetail);
+    renderCrawlCards(items.filter((i) => i.operation === "crawl"));
   }
 
+  // ================= Requests =================
+  const REQ_HEAD = [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Size", "num"], ["Markdown", "num"], ["Model"], ["Status"], ["Duration", "num"], ["Tokens", "num"]];
+  function renderRecent(items) {
+    table($("recent"), REQ_HEAD, items.map((i) => ({
+      raw: i,
+      cells: [
+        [ago(i.created_at)], [requester(i.requester_id)], [opLabel(i)],
+        [fmt(i.format || (i.statistics && i.statistics.format))],
+        [i.source || "—", "src"], [bytes(i.src_bytes), "num"],
+        [i.operation === "crawl" ? (i.statistics && i.statistics.pages ? num(pagesOf(i.statistics.pages)) + " pages" : "—") : bytes(i.statistics && i.statistics.content_bytes), "num"],
+        [model(i)], [statusCell(i)],
+        [ms(i.timings && i.timings.total_ms), "num"],
+        [tokens(i.usage), "num"],
+      ],
+    })), openDetail, "No requests match these filters");
+    drawPager(pages.recent, $("recentPager"), items.length, loadPage);
+  }
+  function renderFailures(items) {
+    table($("failures"), [["When"], ["Requester"], ["Operation"], ["Format"], ["Source"], ["Code"], ["Stage"], ["Message"]], items.map((i) => ({
+      raw: i,
+      cells: [
+        [ago(i.created_at)], [requester(i.requester_id)], [opLabel(i)],
+        [fmt(i.format)], [i.source || "—", "src"],
+        [el("span", { class: "mono" }, (i.error && i.error.code) || "—")], [(i.error && i.error.stage) || "—"],
+        [(i.error && i.error.message) || "", "wrap"],
+      ],
+    })), openDetail, "No failures");
+    drawPager(pages.failures, $("failuresPager"), items.length, loadPage);
+  }
   function requestFilters() {
     const p = { limit: 25 };
     const r = $("fltRequester").value.trim(), o = $("fltOperation").value, f = $("fltFormat").value, s = $("fltStatus").value;
@@ -613,18 +816,125 @@
   }
   function filtersChanged() { resetPage(pages.recent); loadPage(pages.recent); }
 
+  // ================= Sites =================
+  function renderCrawlCards(items) {
+    $("crawlsSection").classList.toggle("hidden", items.length === 0);
+    $("crawls").replaceChildren(...items.map((i) => {
+      const p = crawlProgress[i.job_id], pg = p ? p.pages : null;
+      const done = pagesOf(pg), total = done + (pg ? pg.queued : 0);
+      const cancel = el("button", { class: "btn sm danger", type: "button" }, "Cancel");
+      cancel.onclick = async () => { cancel.disabled = true; try { await rpc("job.cancel", { job_id: i.job_id }); cancel.textContent = "Cancelling…"; } catch (e) { cancel.textContent = e.message; } };
+      return el("div", { class: "card crawl" },
+        el("div", { class: "t" }, el("b", {}, p ? p.site : "…"), pill("running"), el("span", { class: "spacer" }), cancel),
+        el("div", { class: "hint", style: "margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, i.source || ""),
+        el("div", { class: "meter", style: "height:7px;margin-top:12px" }, el("span", { style: `width:${total ? (done / total) * 100 : 3}%` })),
+        el("div", { class: "progress" }, el("div", { class: "nums" },
+          el("span", {}, el("b", {}, num(pg ? pg.converted : 0)), " converted"),
+          el("span", {}, el("b", {}, num(pg ? pg.unchanged : 0)), " unchanged"),
+          el("span", {}, el("b", {}, num(pg ? pg.failed : 0)), " failed"),
+          el("span", {}, el("b", {}, num(pg ? pg.queued : 0)), " queued"))),
+        el("div", { class: "hint", style: "margin-top:8px" }, "Started " + ago(i.created_at)));
+    }));
+  }
+
+  async function loadSites() {
+    $("sitesStatus").textContent = "";
+    try {
+      const d = await rpc("site.list");
+      table($("sitesTable"), [["Site"], ["Pages", "num"], ["Last run"], ["When"], ["Pages file"]],
+        (d.sites || []).map((s) => ({ raw: s, cells: [[el("b", {}, s.site)], [num(s.pages), "num"], [pill(s.last_status)], [ago(s.last_run_at)], [el("span", { class: "mono muted" }, s.pages_file), "src"]] })),
+        (s) => { location.hash = "#sites/" + encodeURIComponent(s.site); },
+        null);
+      if (!(d.sites || []).length) $("sitesTable").replaceChildren(el("div", { class: "empty" }, el("b", {}, "No sites yet"), "Crawl a website and its pages appear here. ", el("a", { href: "#new/crawl" }, "Crawl a site →")));
+    } catch (e) {
+      $("sitesTable").replaceChildren(el("div", { class: "empty" },
+        el("b", {}, e.code === "feature_not_configured" ? "Crawling is not set up" : "Sites unavailable"),
+        e.code === "feature_not_configured" ? "Set DOCVISION_CRAWL_STORE to an s3:// location or a folder to crawl websites." : e.message));
+    }
+  }
+
+  const sitePager = { cursors: [""], i: 0, next: null };
+  async function loadSitePages() {
+    const p = { site: siteSel, limit: 50 };
+    const prefix = $("pgPrefix").value.trim(), status = $("pgStatus").value;
+    if (prefix) p.prefix = prefix;
+    if (status) p.status = status;
+    if (sitePager.cursors[sitePager.i]) p.cursor = sitePager.cursors[sitePager.i];
+    try {
+      const d = await rpc("site.pages", p);
+      sitePager.next = d.next_cursor;
+      table($("pagesTable"), [["URL"], ["Title"], ["Status"], ["Converted"], ["Fetched"]],
+        (d.pages || []).map((g) => ({ raw: g, cells: [[g.url, "src"], [g.title || "—", "src"], [pill(g.status)], [ago(g.converted_at)], [ago(g.fetched_at)]] })),
+        openPage, "No pages match");
+      const newer = el("button", { class: "btn sm", type: "button", onclick: () => { sitePager.i--; loadSitePages(); } }, "‹ Previous");
+      const older = el("button", { class: "btn sm", type: "button", onclick: () => { sitePager.cursors[sitePager.i + 1] = sitePager.next; sitePager.i++; loadSitePages(); } }, "Next ›");
+      newer.disabled = sitePager.i === 0; older.disabled = !sitePager.next;
+      $("pagesPager").replaceChildren(el("span", {}, "Page " + (sitePager.i + 1)), el("span", { class: "spacer" }), newer, older);
+    } catch (e) {
+      $("pagesTable").replaceChildren(el("div", { class: "empty" }, e.message));
+    }
+  }
+  async function openSite(site) {
+    siteSel = site;
+    sitePager.cursors = [""]; sitePager.i = 0;
+    $("siteName").textContent = site;
+    $("siteSub").textContent = "";
+    $("siteFile").textContent = "";
+    try {
+      const d = await rpc("site.list");
+      const s = (d.sites || []).find((x) => x.site === site);
+      if (s) {
+        $("siteSub").textContent = num(s.pages) + " pages · last run " + (s.last_status || "—").replace("_", " ") + " " + ago(s.last_run_at);
+        $("siteFile").textContent = s.pages_file;
+      }
+    } catch (_) {}
+    loadSitePages();
+  }
+  async function openPage(g) {
+    const d = $("drawer");
+    d.replaceChildren(el("div", { class: "muted" }, "Loading…"));
+    d.classList.add("open"); $("scrim").classList.add("open");
+    try {
+      const p = await rpc("site.page", { site: siteSel, url: g.url });
+      const row = p.row || {};
+      const parts = [
+        el("div", { style: "display:flex;align-items:center;gap:12px" }, el("h3", {}, row.title || p.url), pill(p.status), el("span", { class: "spacer" }), el("button", { class: "link", onclick: closeDrawer }, "Close ✕")),
+        el("div", { class: "hint", style: "margin-top:4px;word-break:break-all" }, el("a", { href: p.url, target: "_blank", rel: "noopener noreferrer" }, p.url)),
+      ];
+      parts.push(...resultBody(row, "page"));
+      d.replaceChildren(...parts);
+    } catch (e) {
+      d.replaceChildren(el("div", { class: "error" }, e.message));
+    }
+  }
+  async function reindex(site, btn) {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Reindexing…";
+    try {
+      const r = await rpc("site.reindex", site ? { site } : {});
+      btn.textContent = "Reindexed " + num(r.pages) + " pages";
+      setTimeout(() => (btn.textContent = label), 2500);
+      if (site) openSite(site); else loadSites();
+    } catch (e) { btn.textContent = e.message; } finally { btn.disabled = false; }
+  }
+
+  // ================= refresh =================
   async function refresh() {
     if (busy) return;
     busy = true;
     try {
-      const jobs = [rpc("stats", { window: windowSel }), rpc("history.list", { limit: 100, in_progress: true })];
-      const [s, p] = await Promise.all(jobs);
-      renderStats(s);
-      renderProgress(p.items || []);
-      // Only the visible page of each open panel is refreshed.
+      const [s, p] = await Promise.all([view === "overview" || !lastStats ? rpc("stats", { window: windowSel }) : Promise.resolve(lastStats), rpc("history.list", { limit: 100, in_progress: true })]);
+      lastStats = s;
+      const items = p.items || [];
+      await loadCrawlProgress(items);
+      if (view === "overview") renderStats(s);
+      renderProgress(items);
       const loads = [];
-      if (isOpen($("requestsPanel"))) loads.push(loadPage(pages.recent));
-      if (isOpen($("failuresPanel"))) loads.push(loadPage(pages.failures));
+      if (view === "requests") {
+        loads.push(loadPage(pages.recent));
+        if (isOpen($("failuresPanel"))) loads.push(loadPage(pages.failures));
+      }
+      if (view === "sites" && !siteSel) loads.push(loadSites());
       await Promise.all(loads);
       $("updated").textContent = "Updated " + new Date().toLocaleTimeString();
     } catch (e) {
@@ -632,7 +942,7 @@
     } finally { busy = false; }
   }
 
-  // ---- request detail ----
+  // ================= request detail =================
   function closeDrawer() { $("drawer").classList.remove("open"); $("scrim").classList.remove("open"); }
   async function openDetail(item) {
     const d = $("drawer");
@@ -643,31 +953,46 @@
       const q = g.request, calls = g.calls.items || [], first = calls[0];
       const llm = q.llm_model ? q.llm_provider + " / " + q.llm_model : first ? first.provider + " / " + first.model : "— (no LLM call)";
       const st = q.statistics || {}, u = q.usage || {};
+      const crawl = q.operation === "crawl";
       const parts = [
         el("div", { style: "display:flex;align-items:center;gap:12px" },
-          el("h3", {}, q.operation + (q.execution ? " · " + q.execution : "")), pill(shownStatus(q)),
+          el("h3", {}, opLabel(q)), pill(shownStatus(q)),
           el("span", { class: "spacer" }), el("button", { class: "link", onclick: closeDrawer }, "Close ✕")),
-        el("dl", {},
+        el("dl", { class: "kv" },
           el("dt", {}, "Requester"), el("dd", {}, q.requester_id || "unknown"),
           el("dt", {}, "Provider / model"), el("dd", {}, llm),
-          el("dt", {}, "Source"), el("dd", {}, fileLine(q.source, q.src_bytes)),
-          el("dt", {}, "Destination"), el("dd", {}, q.dest_file || "—"),
-          el("dt", {}, "Markdown file"), el("dd", {}, q.md_file ? fileLine(q.md_file, q.md_bytes) : (q.md_bytes != null ? "not written  ·  " + bytes(q.md_bytes) : "—")),
-          el("dt", {}, "JSON file"), el("dd", {}, fileLine(q.docv_file, q.docv_bytes)),
-          el("dt", {}, "Zip"), el("dd", {}, q.zip_file && q.zip_bytes > 0 ? fileLine(q.zip_file, q.zip_bytes) : "—"),
-          el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
-          el("dt", {}, "Cache"), el("dd", {}, q.cache_hit ? "Served from cache (no extraction, no LLM calls)" : q.cache_hit === false ? "Not cached: converted for this request" : "—"),
+          el("dt", {}, crawl ? "Start URL" : "Source"), el("dd", {}, fileLine(q.source, q.src_bytes)),
+          ...(crawl ? [
+            el("dt", {}, "Pages"), el("dd", {}, st.pages ? num(st.pages.converted) + " converted · " + num(st.pages.unchanged) + " unchanged · " + num(st.pages.failed) + " failed" : "—"),
+            el("dt", {}, "Site pages"), el("dd", {}, (st.files && st.files.output_file) || "—"),
+          ] : [
+            el("dt", {}, "Destination"), el("dd", {}, q.dest_file || "—"),
+            el("dt", {}, "Output file"), el("dd", {}, fileLine(q.output_file, q.output_bytes)),
+            el("dt", {}, "Zip"), el("dd", {}, q.zip_file && q.zip_bytes > 0 ? fileLine(q.zip_file, q.zip_bytes) : "—"),
+            el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
+            el("dt", {}, "Cache"), el("dd", {}, q.cache_hit ? "Served from cache (no extraction, no LLM calls)" : q.cache_hit === false ? "Not cached: converted for this request" : "—"),
+            el("dt", {}, "Pages · words"), el("dd", {}, num(st.original_total_pages) + " · " + num(st.total_words)),
+            el("dt", {}, "Images"), el("dd", {}, st.image_count ? num(st.image_count) + " extracted" : "—"),
+          ]),
           el("dt", {}, "Created"), el("dd", {}, q.created_at ? new Date(q.created_at).toLocaleString() : "—"),
           el("dt", {}, "Duration"), el("dd", {}, ms(q.timings && q.timings.total_ms)),
-          el("dt", {}, "Pages · words"), el("dd", {}, num(st.original_total_pages) + " · " + num(st.total_words)),
-          el("dt", {}, "Images"), el("dd", {}, st.image_count ? num(st.image_count) + " extracted" : "—"),
           el("dt", {}, "Tokens"), el("dd", {}, u.calls ? num(u.input_tokens) + " in · " + num(u.output_tokens) + " out · " + num(u.calls) + " calls" : "—"),
           el("dt", {}, "Request ID"), el("dd", { class: "mono" }, q.request_id),
           el("dt", {}, "Job ID"), el("dd", { class: "mono" }, q.job_id || "—"),
         ),
       ];
+      if (q.job_id && (TERMINAL.includes(shownStatus(q)) || crawl)) {
+        const actions = el("div", { class: "row-flex", style: "margin-top:16px" });
+        const open = el("button", { class: "btn sm", type: "button" }, "Open result");
+        open.onclick = async () => { closeDrawer(); location.hash = "#new"; const r = await rpc("job.get", { job_id: q.job_id }); showOutput(r.result || { status: r.status, error: r.error, job_id: q.job_id }, q.operation); };
+        actions.append(open);
+        const rows = el("button", { class: "btn sm", type: "button" }, "Download rows (.jsonl)");
+        rows.onclick = () => download("/_/jobs/" + q.job_id + "/pages.jsonl", q.job_id + ".jsonl", rows);
+        actions.append(rows);
+        parts.push(actions);
+      }
       if (q.error) parts.push(el("h4", {}, "Error"), el("pre", {}, JSON.stringify(q.error, null, 2)));
-      if (q.warnings && q.warnings.length) parts.push(el("h4", {}, "Warnings"), el("pre", { class: "warn" }, q.warnings.join("\n")));
+      if (q.warnings && q.warnings.length) parts.push(el("h4", {}, "Warnings"), el("pre", {}, q.warnings.join("\n")));
       const evBox = el("div", { class: "card tablewrap" });
       table(evBox, [["Time"], ["Stage"], ["Event"], ["Detail"]], (g.events.items || []).map((e) => {
         let detail = e.detail || "";
@@ -688,111 +1013,165 @@
     }
   }
 
-  // ---- new request ----
+  // ================= new request =================
   function setOp(next) {
     op = next;
-    for (const b of $("opTabs").children) b.classList.toggle("on", b.dataset.op === op);
+    const mode = ["summarize", "chunk", "extract"].includes(op) ? "text" : op;
+    if (mode === "text") textOp = op;
+    for (const b of $("modes").children) b.classList.toggle("on", b.dataset.mode === mode);
+    for (const b of $("textOps").children) b.classList.toggle("on", b.dataset.op === op);
     document.querySelectorAll("#form [data-for]").forEach((n) => n.classList.toggle("hidden", !n.dataset.for.split(" ").includes(op)));
-    $("submitBtn").textContent = { convert: "Convert", chunk: "Chunk", extract: "Extract", summarize: "Generate" }[op];
+    $("submitBtn").textContent = { convert: "Convert", crawl: "Start crawl", chunk: "Chunk", extract: "Extract", summarize: "Generate" }[op];
+    const src = {
+      convert: ["Source", "A URL, an absolute path on the server, or an S3 location."],
+      crawl: ["Start URL", "The crawl starts here and follows links on the same site."],
+    }[op] || ["Text", "Paste the text, or point to a text or Markdown file."];
+    $("srcTitle").textContent = src[0];
+    $("srcHelp").textContent = src[1];
   }
   const val = (id) => $(id).value.trim();
   const intVal = (id) => { const v = val(id); return v === "" ? undefined : parseInt(v, 10); };
+  const lines = (id) => $(id).value.split("\n").map((l) => l.trim()).filter(Boolean);
+  // "Name: value" / "name=value" lines into an object.
+  function pairs(id, sep, what) {
+    const o = {};
+    for (const l of lines(id)) {
+      const i = l.indexOf(sep);
+      if (i <= 0) throw new Error(what + ": write one per line as name" + sep + "value");
+      o[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+    }
+    return o;
+  }
+  function jsonObject(id, what) {
+    const t = val(id);
+    if (!t) return undefined;
+    let v;
+    try { v = JSON.parse(t); } catch (_) { throw new Error(what + " is not valid JSON."); }
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error(what + " must be a JSON object.");
+    return v;
+  }
 
   function buildRequest() {
     const payload = {}, options = {};
     const requesterId = val("f_requester");
     if (requesterId) payload.requester_id = requesterId;
+    if (op === "convert" || op === "crawl") {
+      payload.source = op === "convert" ? val("f_source") : val("f_start");
+      if (!payload.source) throw new Error(op === "convert" ? "Enter a source." : "Enter the start URL.");
+      if (op === "crawl" && val("f_site")) payload.site = val("f_site");
+      const metadata = jsonObject("f_metadata", "Metadata");
+      if (metadata) payload.metadata = metadata;
+      options.gen_title = $("f_gtitle").checked;
+      options.gen_summary = $("f_gsummary").checked;
+      options.detect_language = $("f_glang").checked;
+      options.gen_search = $("f_gsearch").checked;
+      options.gen_chunks = $("f_gchunks").checked;
+      if ($("f_images").checked) options.extract_images = true;
+      options.title_method = $("f_tmethod").value;
+      options.summary_method = $("f_smethod").value;
+      options.language_method = $("f_lmethod").value;
+      if (intVal("f_csize2") !== undefined) options.chunk_size = intVal("f_csize2");
+      const schema = jsonObject("f_schema", "The JSON Schema");
+      if (schema) options.extract_schema = schema;
+      // Web pages
+      if ($("f_render").value !== "auto") options.render = $("f_render").value;
+      if (val("f_waitfor")) options.wait_for = val("f_waitfor");
+      if (intVal("f_waitms") !== undefined) options.wait_ms = intVal("f_waitms");
+      const request = {};
+      const h = pairs("f_headers", ":", "Headers"), q = pairs("f_query", "=", "Query parameters"), c = pairs("f_cookies", "=", "Cookies");
+      if (Object.keys(h).length) request.headers = h;
+      if (Object.keys(q).length) request.query = q;
+      if (Object.keys(c).length) request.cookies = c;
+      if (val("f_ua")) request.user_agent = val("f_ua");
+      if (Object.keys(request).length) payload.request = request;
+    }
     if (op === "convert") {
-      payload.source = val("f_source");
-      if (!payload.source) throw new Error("Source is required.");
       options.execution = $("f_exec").value;
       options.ocr = $("f_ocr").value;
       options.cache = $("f_cache").value;
-      options.gen_chunks = $("f_gchunks").checked;
       options.allow_partial = $("f_partial").checked;
-      if ($("f_images").checked) options.extract_images = true;
-      // The zip is kept with the job, so it needs async execution.
       if ($("f_zip").checked) { options.create_zip = true; options.execution = "async"; }
       if ($("f_ziponly").checked) { options.zip_only = true; options.execution = "async"; }
-      const dest = val("f_dest");
-      if (dest) { payload.destination = dest; options.execution = "async"; }
-    } else {
+      if (val("f_dest")) { payload.destination = val("f_dest"); options.execution = "async"; }
+    }
+    if (op === "crawl") {
+      if (intVal("f_maxpages") !== undefined) options.max_pages = intVal("f_maxpages");
+      if (intVal("f_maxdepth") !== undefined) options.max_depth = intVal("f_maxdepth");
+      if (lines("f_include").length) options.include = lines("f_include");
+      if (lines("f_exclude").length) options.exclude = lines("f_exclude");
+      if (!$("f_samesite").checked) options.same_site = false;
+      if (!$("f_sitemap").checked) options.use_sitemap = false;
+      if (!$("f_robots").checked) options.respect_robots = false;
+    }
+    if (["summarize", "chunk", "extract"].includes(op)) {
       const text = $("f_text").value, src = val("f_tsource");
       if (text.trim()) payload.source_content = text;
       else if (src) payload.source = src;
       else throw new Error("Paste some text or give a source.");
     }
-    const schemaText = $("f_schema").value.trim();
-    if (op === "extract" && !schemaText) throw new Error("A JSON Schema is required.");
-    if ((op === "convert" || op === "extract") && schemaText) {
-      try { options.extract_schema = JSON.parse(schemaText); } catch (_) { throw new Error("The JSON Schema is not valid JSON."); }
+    if (op === "extract") {
+      const schema = jsonObject("f_schema_x", "The JSON Schema");
+      if (!schema) throw new Error("A JSON Schema is required.");
+      options.extract_schema = schema;
     }
-    if (op === "convert" || op === "summarize") {
+    if (op === "summarize") {
       options.gen_title = $("f_gtitle").checked;
       options.gen_summary = $("f_gsummary").checked;
       options.title_method = $("f_tmethod").value;
       options.summary_method = $("f_smethod").value;
+    }
+    if (op === "chunk") {
+      if (intVal("f_csize") !== undefined) options.chunk_size = intVal("f_csize");
+      if (intVal("f_coverlap") !== undefined) options.chunk_overlap = intVal("f_coverlap");
     }
     if (op !== "chunk") {
       for (const [id, k] of [["f_provider", "llm_provider"], ["f_model", "llm_model"], ["f_key", "llm_api_key"], ["f_base", "llm_base_url"]]) {
         if (val(id)) options[k] = val(id);
       }
     }
-    if (op === "convert" || op === "chunk") {
-      if (intVal("f_csize") !== undefined) options.chunk_size = intVal("f_csize");
-      if (intVal("f_coverlap") !== undefined) options.chunk_overlap = intVal("f_coverlap");
-    }
     return { payload, options };
   }
 
-  function showOutput(data, kind) {
-    const out = $("output");
-    out.classList.remove("hidden");
+  // The parts of a converted document worth reading: summary, facts, search terms, tabs.
+  function resultBody(data, kind) {
     const parts = [];
-    const head = el("div", { class: "out-head" });
-    if (data.status) head.append(pill(data.status));
-    if (data.title) head.append(el("span", { class: "out-title" }, data.title));
-    if (head.childNodes.length) parts.push(head);
-    if (data.summary) parts.push(el("p", { class: "out-summary" }, data.summary));
+    if (data.summary) parts.push(el("p", { class: "out-summary", style: "margin-top:12px" }, data.summary));
     const facts = el("div", { class: "facts" });
     const fact = (k, v) => facts.append(el("span", {}, k + " ", el("b", {}, v)));
     if (data.format) fact("Format", data.format);
+    if (data.language) fact("Language", data.language);
     if (data.src_bytes != null) fact("Source", bytes(data.src_bytes));
-    if (data.md_bytes != null) fact("Markdown", bytes(data.md_bytes));
+    if (data.statistics && data.statistics.content_bytes != null) fact("Markdown", bytes(data.statistics.content_bytes));
     if (data.statistics) {
-      fact("Words", num(data.statistics.total_words));
+      if (data.statistics.total_words != null) fact("Words", num(data.statistics.total_words));
       if (data.statistics.original_total_pages != null) fact("Pages", num(data.statistics.original_total_pages));
     }
     if (data.chunks) fact("Chunks", num(data.chunks.length));
     if (data.images && data.images.length) fact("Images", num(data.images.length));
     const t = data.llm && data.llm.totals;
     if (t && t.calls) { fact("Model", (t.provider || "") + " / " + (t.model || "")); fact("Tokens", num((t.input_tokens || 0) + (t.output_tokens || 0))); }
-    if (data.timing) fact("Time", ms(data.timing.total_ms));
+    if (data.timing && data.timing.total_ms != null) fact("Time", ms(data.timing.total_ms));
     if (data.cache_hit) fact("Cache", "hit");
+    if (data.converted_at) fact("Converted", new Date(data.converted_at).toLocaleString());
     if (facts.childNodes.length) parts.push(facts);
-    if (data.md_file || data.docv_file) {
-      parts.push(el("dl", { style: "margin-top:12px" },
-        el("dt", {}, "Markdown file"), el("dd", {}, data.md_file && data.md_bytes === 0 ? data.md_file + "  ·  not written (zip only)" : fileLine(data.md_file, data.md_bytes)),
-        el("dt", {}, "JSON file"), el("dd", {}, fileLine(data.docv_file, data.docv_bytes))));
+    const s = data.search;
+    if (s && (s.keywords?.length || s.questions?.length)) {
+      const box = el("div", { class: "searchbox" });
+      if (s.keywords?.length) box.append(el("div", {}, el("h4", {}, "Keywords"), el("div", { class: "chips" }, ...s.keywords.map((k) => el("span", { class: "chip" }, k)))));
+      if (s.entities?.length) box.append(el("div", {}, el("h4", {}, "Entities"), el("div", { class: "chips" }, ...s.entities.map((k) => el("span", { class: "chip plain" }, k)))));
+      if (s.questions?.length) box.append(el("div", {}, el("h4", {}, "Questions it answers"), el("ul", {}, ...s.questions.map((q) => el("li", {}, q)))));
+      const meta = [s.type, ...(s.topics || [])].filter(Boolean);
+      if (meta.length) box.append(el("div", { class: "chips" }, ...meta.map((k) => el("span", { class: "chip plain" }, k))));
+      parts.push(box);
     }
-    if (data.zip_file && data.zip_bytes > 0) {
-      const line = el("div", {}, fileLine(data.zip_file, data.zip_bytes));
-      // Without a destination the zip is served here; fetch it with the token.
-      if (data.zip_file.startsWith("/_/jobs/")) {
-        const btn = el("button", { type: "button", class: "btn", style: "margin-left:8px" }, "Download zip");
-        btn.onclick = () => downloadZip(data.zip_file, btn);
-        line.append(btn);
-      }
-      parts.push(el("dl", { style: "margin-top:8px" }, el("dt", {}, "Zip"), el("dd", {}, line)));
-    }
-    if (data.warnings && data.warnings.length) parts.push(el("div", { class: "hint warn", style: "margin-top:8px" }, "Warnings: " + data.warnings.join(" · ")));
-    if (data.error) parts.push(el("div", { class: "error", style: "margin-top:8px" }, (data.error.code || "error") + ": " + (data.error.message || "")));
-
-    const views = [];
-    if (data.extracted != null) views.push(["Extracted", () => el("pre", { class: "view" }, JSON.stringify(data.extracted, null, 2)), () => JSON.stringify(data.extracted, null, 2)]);
+    if (data.warnings && data.warnings.length) parts.push(el("div", { class: "hint warn", style: "margin-top:10px" }, "Warnings: " + data.warnings.join(" · ")));
+    if (data.error) parts.push(el("div", { class: "error", style: "margin-top:10px" }, (data.error.code || "error") + ": " + (data.error.message || "")));
     const xs = data.feature_status && data.feature_status.extraction;
     if (xs && xs.status === "failed") parts.push(el("div", { class: "error", style: "margin-top:8px" }, "Structured extraction failed: " + xs.error));
-    if (kind === "convert" && data.content != null) views.push(["Markdown", () => el("pre", { class: "view" }, data.content || "(empty)"), () => data.content]);
+
+    const views = [];
+    if (data.content != null && kind !== "summarize") views.push(["Markdown", () => el("pre", { class: "view" }, data.content || "(empty)"), () => data.content]);
+    if (data.extracted != null) views.push(["Extracted", () => el("pre", { class: "view" }, JSON.stringify(data.extracted, null, 2)), () => JSON.stringify(data.extracted, null, 2)]);
     if (data.chunks && data.chunks.length) views.push(["Chunks", () => {
       const box = el("div");
       for (const c of data.chunks) box.append(el("div", { class: "chunk" },
@@ -815,20 +1194,97 @@
       if (!navigator.clipboard) return;
       navigator.clipboard.writeText(views[current][2]() || "").then(() => { copy.textContent = "Copied"; setTimeout(() => (copy.textContent = "Copy"), 1200); });
     };
-    parts.push(el("div", { style: "display:flex;align-items:center;gap:8px;margin-top:16px" }, seg, el("span", { class: "spacer" }), copy), body);
-    out.replaceChildren(...parts);
+    parts.push(el("div", { style: "display:flex;align-items:center;gap:8px;margin-top:18px" }, seg, el("span", { class: "spacer" }), copy), body);
     show(0);
+    return parts;
   }
 
-  async function waitForJob(jobId) {
+  function showOutput(data, kind) {
+    const out = $("output");
+    out.classList.remove("hidden");
+    if (data.operation === "crawl" || kind === "crawl") return showCrawl(data, out);
+    const head = el("div", { class: "out-head" });
+    if (data.status) head.append(pill(data.status));
+    head.append(el("span", { class: "out-title" }, data.title || (kind === "chunk" ? "Chunks" : kind === "extract" ? "Extracted data" : "Result")));
+    const parts = [head];
+    const files = el("dl", { class: "files" });
+    if (data.output_file) files.append(el("dt", {}, "Output file"), el("dd", {}, data.output_file));
+    if (data.images_dir) files.append(el("dt", {}, "Images"), el("dd", {}, data.images_dir));
+    if (data.zip_file && data.zip_bytes > 0) {
+      const dd = el("dd", {}, fileLine(data.zip_file, data.zip_bytes));
+      if (data.zip_file.startsWith("/_/jobs/")) {
+        const btn = el("button", { type: "button", class: "btn sm", style: "margin-left:8px" }, "Download zip");
+        btn.onclick = () => download(data.zip_file, "document.zip", btn);
+        dd.append(btn);
+      }
+      files.append(el("dt", {}, "Zip"), dd);
+    }
+    if (files.childNodes.length) parts.push(files);
+    parts.push(...resultBody(data, kind));
+    out.replaceChildren(...parts);
+  }
+
+  // A crawl run: progress while it runs, then where its pages are.
+  function showCrawl(r, out, live) {
+    const pg = r.pages || (live && live.pages) || { converted: 0, unchanged: 0, failed: 0, queued: 0 };
+    const done = pagesOf(pg), total = done + (pg.queued || 0);
+    const site = r.site || (live && live.site) || "";
+    const running = !TERMINAL.includes(r.status);
+    const head = el("div", { class: "out-head" }, pill(running ? "running" : r.status), el("span", { class: "out-title" }, "Crawl of " + (site || "…")));
+    if (running && r.job_id) {
+      const cancel = el("button", { class: "btn sm danger", type: "button" }, "Cancel");
+      cancel.onclick = async () => { cancel.disabled = true; try { await rpc("job.cancel", { job_id: r.job_id }); cancel.textContent = "Cancelling…"; } catch (e) { cancel.textContent = e.message; } };
+      head.append(el("span", { class: "spacer" }), cancel);
+    }
+    const parts = [head,
+      el("div", { class: "progress" },
+        el("div", { class: "meter" }, el("span", { style: `width:${running ? (total ? (done / total) * 100 : 3) : 100}%` })),
+        el("div", { class: "nums" },
+          el("span", {}, el("b", {}, num(pg.converted)), " converted"),
+          el("span", {}, el("b", {}, num(pg.unchanged)), " unchanged"),
+          el("span", {}, el("b", {}, num(pg.failed)), " failed"),
+          running ? el("span", {}, el("b", {}, num(pg.queued)), " queued") : null))];
+    if (!running) {
+      const files = el("dl", { class: "files" });
+      if (r.site_pages_file) files.append(el("dt", {}, "Site pages"), el("dd", {}, r.site_pages_file));
+      if (r.pages_file) files.append(el("dt", {}, "This run"), el("dd", {}, r.pages_file));
+      const t = r.llm && r.llm.totals;
+      if (t && t.calls) files.append(el("dt", {}, "LLM"), el("dd", {}, num(t.calls) + " calls · " + num((t.input_tokens || 0) + (t.output_tokens || 0)) + " tokens"));
+      if (r.timing) files.append(el("dt", {}, "Time"), el("dd", {}, ms(r.timing.total_ms)));
+      parts.push(files);
+      if (r.error) parts.push(el("div", { class: "error", style: "margin-top:10px" }, (r.error.code || "error") + ": " + (r.error.message || "")));
+      const actions = el("div", { class: "row-flex", style: "margin-top:16px" });
+      if (site) actions.append(el("a", { class: "btn primary", href: "#sites/" + encodeURIComponent(site) }, "Browse the pages →"));
+      if (r.job_id) {
+        const rows = el("button", { class: "btn", type: "button" }, "Download this run (.jsonl)");
+        rows.onclick = () => download("/_/jobs/" + r.job_id + "/pages.jsonl", site + "-" + r.job_id + ".jsonl", rows);
+        actions.append(rows);
+      }
+      parts.push(actions);
+    } else {
+      parts.push(el("div", { class: "hint", style: "margin-top:10px" }, "Pages are saved as they are converted. You can leave this page; the crawl keeps running (see Sites)."));
+    }
+    out.replaceChildren(...parts);
+  }
+
+  async function waitForJob(jobId, kind) {
     const status = $("formStatus");
     for (;;) {
+      if (kind === "crawl") {
+        const g = await rpc("job.get", { job_id: jobId, fields: ["status"] });
+        if (TERMINAL.includes(g.status)) break;
+        showCrawl({ status: g.status, job_id: jobId }, $("output"), g.progress);
+        $("output").classList.remove("hidden");
+        status.textContent = "Crawling…";
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
       const w = await rpc("job.wait", { job_id: jobId, timeout_ms: 25000 });
       status.textContent = "Job " + jobId.slice(0, 13) + "… " + w.status;
       if (!["queued", "running"].includes(w.status)) break;
     }
     const g = await rpc("job.get", { job_id: jobId });
-    return g.result || { status: g.status, error: g.error };
+    return g.result || { status: g.status, error: g.error, job_id: jobId };
   }
 
   $("form").onsubmit = async (ev) => {
@@ -838,32 +1294,59 @@
     try { req = buildRequest(); } catch (e) { status.className = "hint error"; status.textContent = e.message; return; }
     status.className = "hint"; status.textContent = "Working…"; btn.disabled = true;
     $("output").classList.add("hidden");
-    const t0 = performance.now();
+    const t0 = performance.now(), kind = op;
     try {
-      let data = await rpc(op, req.payload, req.options);
-      if (op === "convert" && req.options.execution === "async" && data.job_id) {
-        status.textContent = "Queued as job " + data.job_id.slice(0, 13) + "…";
-        refresh();
-        data = await waitForJob(data.job_id);
+      let data = await rpc(kind, req.payload, req.options);
+      if ((kind === "convert" && req.options.execution === "async") || kind === "crawl") {
+        if (data.job_id) {
+          status.textContent = kind === "crawl" ? "Crawl started" : "Queued as job " + data.job_id.slice(0, 13) + "…";
+          refresh();
+          data = await waitForJob(data.job_id, kind);
+        }
       }
-      showOutput(data, op);
+      showOutput(data, kind);
       status.textContent = "Done in " + ms(Math.round(performance.now() - t0));
+      $("output").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
       if (e.message === "unauthorized") return;
       status.className = "hint error";
       status.textContent = (e.code ? e.code + ": " : "") + e.message;
-      if (e.data) showOutput(e.data, op);
+      if (e.data && typeof e.data === "object" && !e.data.job_id) showOutput(e.data, kind);
     } finally {
       btn.disabled = false;
       refresh();
     }
   };
 
-  // ---- wiring ----
+  // ================= routing =================
+  function route() {
+    const [v, ...rest] = (location.hash.slice(1) || "overview").split("/");
+    view = ["overview", "requests", "sites", "new"].includes(v) ? v : "overview";
+    document.querySelectorAll("[data-view]").forEach((n) => n.classList.toggle("hidden", n.dataset.view !== view));
+    for (const a of $("tabs").children) a.classList.toggle("on", a.dataset.v === view);
+    closeDrawer();
+    if (view === "sites") {
+      const site = rest.length ? decodeURIComponent(rest.join("/")) : null;
+      $("sitesList").classList.toggle("hidden", !!site);
+      $("siteDetail").classList.toggle("hidden", !site);
+      siteSel = site;
+      if (site) openSite(site); else loadSites();
+    }
+    if (view === "new") {
+      if (rest[0] === "crawl") setOp("crawl");
+      else if (rest[0] === "text") setOp(textOp);
+      else if (rest[0] === "convert") setOp("convert");
+      window.scrollTo({ top: 0 });
+    }
+    if (view === "overview" && lastStats) renderStats(lastStats);
+    refresh();
+  }
+
+  // ================= wiring =================
   function start() {
     $("loginWrap").classList.add("hidden");
     $("app").classList.remove("hidden");
-    refresh();
+    route();
     clearInterval(timer);
     timer = setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   }
@@ -882,75 +1365,44 @@
     try { await rpc("history.list", { limit: 1 }); start(); } catch (_) { /* signOut already shown */ }
   };
   $("logout").onclick = () => signOut();
-  $("newBtn").onclick = () => {
-    const p = $("newPanel");
-    p.classList.toggle("hidden");
-    if (!p.classList.contains("hidden")) { window.scrollTo({ top: 0, behavior: "smooth" }); (op === "convert" ? $("f_source") : $("f_text")).focus(); }
+  window.addEventListener("hashchange", () => { if (!$("app").classList.contains("hidden")) route(); });
+  $("modes").onclick = (ev) => {
+    const b = ev.target.closest(".mode");
+    if (b) setOp(b.dataset.mode === "text" ? textOp : b.dataset.mode);
   };
-  $("exampleSchema").onclick = () => {
-    $("f_schema").value = JSON.stringify({
-      type: "object",
-      required: ["merchant", "total"],
-      properties: {
-        merchant: { type: "string" },
-        date: { type: ["string", "null"], description: "YYYY-MM-DD" },
-        currency: { type: ["string", "null"], description: "ISO 4217 code" },
-        total: { type: "number" },
-        tax: { type: ["number", "null"] },
-        items: { type: "array", items: { type: "object", properties: { name: { type: "string" }, qty: { type: "number" }, price: { type: "number" } } } },
-      },
-    }, null, 2);
-  };
-  $("dbDownload").onclick = async () => {
-    const btn = $("dbDownload"), status = $("dbStatus");
-    btn.disabled = true; status.className = "hint"; status.textContent = "Preparing snapshot…";
-    try {
-      const r = await fetch("/_/db", { headers: { "X-ACCESS-TOKEN": sessionStorage.getItem(KEY) || "" } });
-      if (r.status === 401) { signOut("Invalid token."); return; }
-      if (!r.ok) throw new Error(await r.text() || "download failed");
-      const name = ((r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/) || [])[1] || "docvision.sqlite";
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = el("a", { href: url, download: name });
-      document.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      status.textContent = "Downloaded " + name + " (" + bytes(blob.size) + ")";
-    } catch (e) {
-      status.className = "hint error"; status.textContent = e.message;
-    } finally { btn.disabled = false; }
-  };
-  async function downloadZip(path, btn) {
-    btn.disabled = true;
-    const label = btn.textContent;
-    btn.textContent = "Downloading…";
-    try {
-      const r = await fetch(path, { headers: { "X-ACCESS-TOKEN": sessionStorage.getItem(KEY) || "" } });
-      if (r.status === 401) { signOut("Invalid token."); return; }
-      if (!r.ok) throw new Error(await r.text() || "download failed");
-      const name = ((r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/) || [])[1] || "document.zip";
-      const url = URL.createObjectURL(await r.blob());
-      const a = el("a", { href: url, download: name });
-      document.body.append(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10000);
-      btn.textContent = label;
-    } catch (e) {
-      btn.textContent = "Failed: " + e.message;
-    } finally { btn.disabled = false; }
-  }
-  $("closeNew").onclick = () => $("newPanel").classList.add("hidden");
-  $("opTabs").onclick = (ev) => { if (ev.target.dataset.op) setOp(ev.target.dataset.op); };
-  $("liveBadge").onclick = () => { if (!$("progressSection").classList.contains("hidden")) $("progressSection").scrollIntoView({ behavior: "smooth", block: "start" }); };
+  $("textOps").onclick = (ev) => { if (ev.target.dataset.op) setOp(ev.target.dataset.op); };
+  const receipt = () => JSON.stringify({
+    type: "object",
+    required: ["merchant", "total"],
+    properties: {
+      merchant: { type: "string" },
+      date: { type: ["string", "null"], description: "YYYY-MM-DD" },
+      currency: { type: ["string", "null"], description: "ISO 4217 code" },
+      total: { type: "number" },
+      tax: { type: ["number", "null"] },
+      items: { type: "array", items: { type: "object", properties: { name: { type: "string" }, qty: { type: "number" }, price: { type: "number" } } } },
+    },
+  }, null, 2);
+  document.querySelectorAll(".exampleSchema").forEach((b) => (b.onclick = () => { $(op === "extract" ? "f_schema_x" : "f_schema").value = receipt(); }));
+  $("dbDownload").onclick = () => download("/_/db", "docvision.sqlite", $("dbDownload"));
+  $("liveBadge").onclick = () => { location.hash = "#overview"; setTimeout(() => { if (!$("progressSection").classList.contains("hidden")) $("progressSection").scrollIntoView({ behavior: "smooth", block: "start" }); }, 50); };
   $("windows").onclick = (ev) => {
     const w = ev.target.dataset.w;
     if (!w) return;
     windowSel = w;
     for (const b of $("windows").children) b.classList.toggle("on", b === ev.target);
+    lastStats = null;
     refresh();
   };
   let debounce;
   $("fltRequester").oninput = () => { clearTimeout(debounce); debounce = setTimeout(filtersChanged, 300); };
   for (const id of ["fltOperation", "fltFormat", "fltStatus"]) $(id).onchange = filtersChanged;
   $("clearFilters").onclick = () => { for (const id of ["fltRequester", "fltOperation", "fltFormat", "fltStatus"]) $(id).value = ""; filtersChanged(); };
+  $("pgPrefix").oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { sitePager.cursors = [""]; sitePager.i = 0; loadSitePages(); }, 300); };
+  $("pgStatus").onchange = () => { sitePager.cursors = [""]; sitePager.i = 0; loadSitePages(); };
+  $("reindexAll").onclick = () => reindex(null, $("reindexAll"));
+  $("siteReindex").onclick = () => reindex(siteSel, $("siteReindex"));
+  $("siteCrawl").onclick = () => { $("f_site").value = siteSel || ""; location.hash = "#new/crawl"; };
   setupPanel($("requestsPanel"), () => loadPage(pages.recent));
   setupPanel($("failuresPanel"), () => loadPage(pages.failures));
   $("scrim").onclick = closeDrawer;

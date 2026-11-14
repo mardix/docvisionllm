@@ -74,7 +74,7 @@ async fn truncated_output_splits_the_batch() {
 async fn structured_extraction_uses_output_config_format() {
     let s = anthropic_server().await;
     let p = s.write("r.md", b"# Corner Cafe\n\nTotal: 9.00\n");
-    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local"});
+    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false});
     let (st, v) = s.convert_sync(&p, opts).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["data"]["extracted"]["merchant"], "mock");
@@ -95,7 +95,7 @@ async fn falls_back_when_effort_or_format_is_rejected() {
     s.mock.anthropic_reject_effort.store(true, SeqCst);
     s.mock.anthropic_reject_format.store(true, SeqCst);
     let p = s.write("r.md", b"# Corner Cafe\n\nTotal: 9.00\n");
-    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local"});
+    let opts = json!({"extract_schema": receipt_schema(), "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false});
     let (st, v) = s.convert_sync(&p, opts.clone()).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["data"]["extracted"]["total"], 42.5, "extraction still works from the prompt alone");
@@ -107,7 +107,7 @@ async fn falls_back_when_effort_or_format_is_rejected() {
     let (st, _) = s
         .convert_sync(
             &p,
-            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local"}),
+            json!({"extract_schema": receipt_schema(), "cache": "bypass", "title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     assert_eq!(st, 200);

@@ -1,10 +1,11 @@
-# docvision-llm-ws
+# docvisionllm
 
 A lean HTTP service that converts documents to Markdown, and can extract structured JSON from them.
 
 - **PDFs and images** are transcribed by an LLM (OpenAI, Gemini, Anthropic Claude or any OpenAI-compatible API).
 - **DOCX, XLSX, PPTX, HTML, Markdown, text** (plus ODT/ODS/ODP/EPUB with `odf-epub`) are parsed natively, without an LLM.
-- Each result includes the Markdown, a title, a summary, chunks, statistics, LLM usage and timings.
+- **Web pages** are fetched as they are, or rendered in a headless Chrome (its own container) when they need JavaScript. **Whole sites** can be crawled.
+- Each result is one JSON Lines record: the Markdown, a title, a summary, the language, search terms, statistics, LLM usage and timings.
 - **Structured data:** pass a JSON Schema, and the result also carries the data it describes (a receipt's merchant and total, an invoice's line items, …).
 
 One binary, ~10 MiB idle, ~25 ms startup, SQLite by default.
@@ -27,7 +28,7 @@ Set these as environment variables or in `.env`. Only `DOCVISION_TOKEN` is requi
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DOCVISION_TOKEN` | — | Access token, at least 16 characters |
+| `DOCVISION_TOKEN` | — | Access token, at least 6 characters. Use a long random one (`scripts/setup-env.sh` makes 40) for anything reachable from a network |
 | `DOCVISION_BIND` | `0.0.0.0:4242` | Listen address |
 | `DOCVISION_DATA_DIR` | `./data` | Database, downloads, results |
 | `DOCVISION_DATABASE_URL` | SQLite in `DATA_DIR` | `postgres://…` needs the `postgres` feature |
@@ -42,6 +43,10 @@ Set these as environment variables or in `.env`. Only `DOCVISION_TOKEN` is requi
 | `DOCVISION_RESULT_RETENTION` | `24h` | Results, jobs and cache |
 | `DOCVISION_HISTORY_RETENTION` | `30d` | Request history |
 | `DOCVISION_S3_ENDPOINT` | — | S3-compatible store (MinIO, R2, …) |
+| `DOCVISION_BROWSER_URL` | — | The browser container's DevTools endpoint (`http://browser:9222`). Rendering web pages needs it |
+| `DOCVISION_BROWSER_CONCURRENCY` | `4` | Pages rendered at once (each uses ~100–300 MB in the browser container) |
+| `DOCVISION_CRAWL_STORE` | — | Where crawled sites are kept: `s3://bucket/crawls/` or a folder (`./data/crawls` locally, `/data/crawls` in Docker). A folder is created at startup. `crawl` needs it |
+| `DOCVISION_MAX_CRAWLS` | `2` | Crawls running at once |
 
 Sizes accept `KB`, `MiB`, `GB`, …. Durations accept `ms`, `s`, `m`, `h`, `d`.
 
@@ -76,6 +81,7 @@ Requests can override any of these with the `llm_*` options.
 | `GET /_/doc` | none | This README as a web page |
 | `GET /_/images/{file}` | token | An extracted image, by the file name listed in a result's `images` |
 | `GET /_/jobs/{job_id}/zip` | token | The zip of a job without a destination (see [Zip](#zip)) |
+| `GET /_/jobs/{job_id}/pages.jsonl` | token | A job's rows as JSON Lines: one line for `convert`, one per page for a crawl run |
 | `GET /_/db` | token | Download a snapshot of the SQLite database (the dashboard has a button for it). `404` when the database is PostgreSQL |
 | `GET /metrics` | token | Prometheus metrics |
 | `GET /livez` | none | `200 ok` while the process is up |
@@ -116,13 +122,16 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
 
 | Operation | Purpose |
 | --- | --- |
-| `convert` | Convert a document (async by default) |
+| `convert` | Convert a document or web page (async by default) |
+| `crawl` | Crawl a site and convert every page (always async). See [crawl](#crawl) |
 | `summarize` | Title and summary for text |
 | `chunk` | Split text into chunks |
 | `extract` | Structured JSON from text, following a JSON Schema |
 | `job.get` | A job's state and result |
 | `job.wait` | Wait until a job changes state |
 | `job.zip` | Build the zip for a finished job |
+| `job.cancel` | Stop a running crawl |
+| `site.list`, `site.pages`, `site.page`, `site.reindex` | Crawled sites and their pages. See [Sites](#sites) |
 | `history.list` | Past requests, newest first |
 | `history.get` | One request with its events and LLM calls |
 | `stats` | Activity summary (what the dashboard shows) |
@@ -137,7 +146,7 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
   "operation": "convert",
   "payload": {
     "source": "https://example.com/report.pdf",
-    "destination": "s3://bucket/out/report.md",
+    "destination": "s3://bucket/out/",
     "metadata": {
       "ref": "abc-123"
     },
@@ -157,32 +166,42 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
 | Field | Description |
 | --- | --- |
 | `source` | **Required.** Absolute path, `file:///…`, `https://…`, or `s3://bucket/key` |
-| `destination` | Async only. A folder (ending in `/`) or a `.md` path, local or S3 (details below) |
+| `destination` | Async only. A folder (ending in `/`) or a `.jsonl` path, local or S3 (details below) |
+| `request` | Headers, query parameters and cookies for fetching an `http(s)` source (details below) |
 | `metadata` | Any object. Returned in results and webhooks |
 | `requester_id` | Who is asking: a name or ID, up to 128 characters. Default `unknown`. Used to filter history and in `stats` (also accepted by `summarize`, `chunk` and `extract`) |
 | `webhook` | Async only. One webhook or an array of them. See [Webhooks](#webhooks) |
 
-**Sources:** `https://` always works. `http://` is accepted only for `localhost`/`127.0.0.1`. Redirects must stay on HTTPS.
+**Sources:** `https://` always works. `http://` is accepted only for `localhost`/`127.0.0.1`. Redirects must stay on HTTPS. Web pages are fetched as `docvision/<version>`.
 
-**Destination:** two files are written, the Markdown and the full JSON result.
+**Request:** for sources behind a login, an API gateway or a locale switch.
 
-- **A folder** (ending in `/`): both are named after the source file, keeping its extension, so documents with the same name but different formats never collide.
+```json
+"request": {
+  "headers": {"Authorization": "Bearer …", "Accept-Language": "fr-FR"},
+  "query": {"lang": "fr", "token": "…"},
+  "cookies": {"session": "…"},
+  "user_agent": "acme-kb-sync/1.0"
+}
+```
+
+- `headers` and `cookies` are sent with every request to the source's site, and `query` is added to every URL fetched there (also to each page of a crawl, and to a rendered page's own requests).
+- **Only the source's site gets them** (`www.` and the bare domain count as one): never other hosts such as CDNs or analytics, and a redirect to another host drops them.
+- **They are secrets:** stored encrypted with the job, never written to results, history, logs or webhooks, and `query` values are removed from the URLs results show.
+- At most 64 entries and 8 KiB in total. `Host`, `Content-Length`, `Connection` and `x-docvision-*` are not allowed. Only for `http(s)` sources.
+
+**Destination:** the result is written as JSON Lines: one line, the same record the API returns, with the Markdown in `content`. No `.md` file is written.
+
+- **A folder** (ending in `/`): the file is named after the source file, keeping its extension, so documents with the same name but different formats never collide.
 
   ```
-  "destination": "s3://bucket/out/"      source: …/hello.pdf
+  "destination": "s3://bucket/out/"        source: …/hello.pdf
 
-  s3://bucket/out/hello.pdf.md           ← markdown
-  s3://bucket/out/hello.pdf.docv.json    ← full result
+  s3://bucket/out/hello.pdf.jsonl          ← the result
+  s3://bucket/out/images/…                 ← extracted images (extract_images)
   ```
 
-- **A `.md` file:** the Markdown goes there, and the JSON is written next to it as `<name>.docv.json`.
-
-  ```
-  "destination": "/out/report.md"
-
-  /out/report.md            ← markdown
-  /out/report.docv.json     ← full result
-  ```
+- **A `.jsonl` file:** the result goes there.
 
 Existing files are replaced. Set `overwrite: false` to keep them instead; the job then fails with `409 destination_exists`.
 
@@ -213,8 +232,8 @@ All options are optional, and all are top-level keys in `options`.
 | `cache` | `use` | `use`, `bypass`, `refresh` |
 | `allow_partial` | `false` | Accept partial extraction (`status: "partial"`) |
 | `overwrite` | `true` | Replace existing destination files. `false` fails the job with `409 destination_exists` instead |
-| `create_zip` | `false` | Also write a zip with the Markdown, `summary.md` and the images. Async only. See [Zip](#zip) |
-| `zip_only` | `false` | Write only the zip and the JSON result to the destination, not the separate `.md` and `images/`. Turns on `create_zip` |
+| `create_zip` | `false` | Also write a zip with the result (`.jsonl`) and the images. Async only. See [Zip](#zip) |
+| `zip_only` | `false` | Write only the zip to the destination, not the `.jsonl` and `images/`. Turns on `create_zip` |
 
 **PDF and images**
 
@@ -253,21 +272,36 @@ All options are optional, and all are top-level keys in `options`.
 | --- | --- | --- |
 | `gen_title` | `true` | Off: `title: null` |
 | `gen_summary` | `true` | Off: `summary: null` |
-| `gen_chunks` | `true` | Off: `chunks: []` |
+| `gen_search` | `true` | Keywords, entities and questions for finding the document. Off: `search: null` |
+| `gen_chunks` | `false` | On: `chunks` lists the document's chunks. Off: `chunks: null` |
 | `title_method` | `llm` | `llm`, `local` |
 | `summary_method` | `llm` | `llm`, `local` (extractive) |
 | `chunk_size` | `512` | Tokens (≈ characters ÷ 4). 128 to 200000; smaller values become 128 |
 | `chunk_overlap` | 15% of `chunk_size` | Tokens repeated from the previous chunk. `0` disables it |
-| `detect_language` | `false` | |
-| `language_method` | `local` | `local` (`lang-detect` feature), `llm` |
+| `detect_language` | `true` | |
+| `language_method` | `llm` | `llm`, `local` (`lang-detect` feature). If the LLM fails, the local detector is used |
 | `translate_to` | `null` | A BCP-47 tag (`translate` feature) |
 | `words_per_page` | `500` | For `markdown_estimated_total_pages` |
+
+**One LLM call:** title, summary, language and `search` come from a single call to the model (one JSON answer). Turning on language and search adds output tokens, not calls.
+
+**Search:** `search` describes the document for finding it, not for reading: `keywords` (terms people would search with, including synonyms the text may not use), `entities` (products, organizations, people, versions, settings, error codes), `questions` (questions the document answers, as a reader would ask them), `topics` and `type` (how-to, reference, faq, article, report, …). Index these fields next to `content` for better keyword search, or give a model the titles, summaries and `questions` of many documents to choose which ones to read in full.
 
 **Chunking:** chunks follow the document's structure. A heading starts a new chunk, and paragraphs, tables and code are split at line boundaries. A heading is never returned on its own: it stays with the text under it, even when a sub-heading comes first. Chunks under a quarter of `chunk_size` are merged into a neighbour. Each chunk's `headings` holds its heading path.
 
 **Images:** `extract_images: true` extracts the pictures embedded in DOCX, PPTX, XLSX, ODT/ODS/ODP, EPUB and HTML (`data:` images). See [Extracted images](#extracted-images).
 
 **Local title:** the document's own title (Office/ODF/EPUB metadata, HTML `<title>`, Markdown `# `), else the first heading, else the file name. If an LLM title fails, the local title is used and `feature_status.title.method` is `local_fallback`.
+
+**Web pages** (need `DOCVISION_BROWSER_URL`)
+
+| Option | Default | Values |
+| --- | --- | --- |
+| `render` | `auto` | `auto`: render in the browser when the page looks empty without JavaScript (under 200 visible characters). `on`: always render HTML pages. `off`: never |
+| `wait_for` | — | With rendering: wait until this CSS selector matches (up to 10 s) |
+| `wait_ms` | — | With rendering: wait this much longer (at most 20000) |
+
+A rendered page is loaded in a fresh browser context, waits until loaded and the network has been quiet for 0.5 s (30 s at most), then `wait_for` / `wait_ms`, and the resulting HTML is converted. Images, media and fonts are not downloaded, and link-local and cloud-metadata addresses are refused. Without the browser container, `render: on` returns `400 feature_not_configured` and `auto` converts the page as fetched.
 
 **LLM**
 
@@ -311,67 +345,59 @@ See [Structured extraction](#structured-extraction) for how it works.
 
 ### Result
 
+A result is one JSON Lines record: the API returns it, and a destination gets it as a `.jsonl` file (one line).
+
 ```json
 {
-  "schema_version": 1,
-  "request_id": "01a10e96-…",
+  "schema_version": 2,
+  "operation": "convert",
   "job_id": "01a10e96-…",
+  "request_id": "01a10e95-…",
   "status": "completed",
   "cache_hit": false,
   "src_file": "https://example.com/report.pdf",
   "src_bytes": 4821337,
   "dest_file": "s3://bucket/out/",
-  "md_file": "s3://bucket/out/report.pdf.md",
-  "md_bytes": 20117,
-  "docv_file": "s3://bucket/out/report.pdf.docv.json",
-  "docv_bytes": 48213,
+  "output_file": "s3://bucket/out/report.pdf.jsonl",
   "images_dir": "s3://bucket/out/images/",
   "zip_file": "s3://bucket/out/report.pdf.zip",
   "zip_bytes": 0,
-  "metadata": {
-    "ref": "abc-123"
-  },
   "format": "pdf",
-  "content": "# Quarterly Report\n\n…",
   "title": "Quarterly Report Q3",
   "summary": "Revenue grew …",
+  "language": "en",
+  "language_detection": {"code": "en", "method": "llm", "confidence": 0.97},
+  "search": {
+    "keywords": ["quarterly report", "Q3", "revenue", "margin"],
+    "entities": ["Acme Corp", "Q3 2026"],
+    "questions": ["How much did revenue grow in Q3?", "Why did cloud costs rise?"],
+    "topics": ["finance"],
+    "type": "report"
+  },
+  "content": "# Quarterly Report\n\n…",
   "extracted": null,
-  "chunks": [
-    {
-      "index": 0,
-      "content": "…",
-      "headings": ["Quarterly Report"],
-      "source_span": {
-        "kind": "page",
-        "from": 1,
-        "to": 2
-      },
-      "tokens": 498,
-      "tokens_estimated": true
-    }
-  ],
-  "language": null,
+  "images": [],
+  "chunks": null,
   "translated_content": null,
+  "translated_language": null,
   "statistics": {
     "original_total_pages": 12,
     "markdown_estimated_total_pages": 8,
     "total_words": 3912,
     "total_characters": 24310,
     "content_bytes": 24655,
-    "chunk_count": 5
+    "chunk_count": 0
   },
   "feature_status": {
-    "title": {
-      "status": "completed",
-      "method": "llm"
-    },
-    "summary": {
-      "status": "completed",
-      "method": "llm"
-    }
+    "title": {"status": "completed", "method": "llm"},
+    "summary": {"status": "completed", "method": "llm"},
+    "language": {"status": "completed", "method": "llm"},
+    "search": {"status": "completed", "method": "llm"},
+    "chunks": {"status": "disabled"}
   },
   "warnings": [],
-  "error": null,
+  "metadata": {"ref": "abc-123"},
+  "content_hash": "b3:9f1c…",
   "llm": {
     "calls": [],
     "totals": {
@@ -391,33 +417,30 @@ See [Structured extraction](#structured-extraction) for how it works.
     "queue_ms": 12,
     "processing_ms": 21480,
     "total_ms": 21492,
-    "stages": {
-      "fetch_ms": 310,
-      "extraction_ms": 18350,
-      "enrichment_ms": 2600,
-      "translation_ms": 0,
-      "storage_ms": 40
-    }
-  }
+    "stages": {"fetch_ms": 310, "extraction_ms": 18350, "enrichment_ms": 2600, "translation_ms": 0, "storage_ms": 40}
+  },
+  "fetched_at": "2026-11-13T10:02:11Z",
+  "converted_at": "2026-11-13T10:02:33Z",
+  "error": null
 }
 ```
 
 - `status` is `completed`, `partial` or `failed`.
+- **Every result has the same keys.** A feature that is off is `null` (`chunks`, `search`, `extracted`, `translated_*`).
 - **Files and sizes** (sizes are in bytes; credentials are never included in paths):
 
   | Field | Meaning | `null` when |
   | --- | --- | --- |
   | `src_file`, `src_bytes` | The source document and its size | `src_bytes`: the source couldn't be fetched or converted |
-  | `dest_file` | The destination as you requested it (a folder or a `.md` location) | no destination (always for sync) |
-  | `md_file` | Where the Markdown was written | no destination, or writing failed |
-  | `md_bytes` | Size of the Markdown (the `content` field) | the conversion failed |
-  | `docv_file`, `docv_bytes` | Where the JSON result was written, and its exact size | no destination, or writing failed |
+  | `dest_file` | The destination as you requested it (a folder or a `.jsonl` location) | no destination (always for sync) |
+  | `output_file` | Where this result was written | no destination, `zip_only`, or writing failed |
   | `images_dir` | Where extracted images were written | no destination, no images, or `zip_only` |
   | `zip_file`, `zip_bytes` | Where the zip is, or will be once `job.zip` builds it. `zip_bytes` is `0` until it exists | `zip_file`: sync conversions (`zip_bytes` is then `0`) |
 
-  With `zip_only`, `md_file` keeps its path and `md_bytes` is `0`: a size of `0` means the file was not written.
-- `extracted` holds the structured data when `extract_schema` was given (see below), otherwise `null`.
-- `feature_status` reports each optional feature (`title`, `summary`, `chunks`, `language`, `translation`, `extraction`) as `completed`, `failed`, `skipped` or `disabled`, with the method used and any error.
+  The size of the written file is `output_bytes` in the `job.finished` webhook and in history (a file can't contain its own size). The Markdown's size is `statistics.content_bytes`.
+- `content_hash` is a hash of the source's bytes, to spot documents that changed. `fetched_at` is when a URL source was fetched, `converted_at` when this result was produced (UTC).
+- `extracted` holds the structured data when `extract_schema` was given (see below).
+- `feature_status` reports each optional feature (`title`, `summary`, `language`, `search`, `chunks`, `translation`, `extraction`) as `completed`, `failed`, `skipped` or `disabled`, with the method used and any error.
 - `llm.calls` has one record per attempt (provider, model, status, tokens, duration), including retries and failures.
 - Token counts the provider did not report are `null`, never `0`. The service does not calculate prices; use the token counts.
 
@@ -446,7 +469,7 @@ Revenue grew 12% this quarter.
 - **Skipped:** icons smaller than 32×32 pixels or 256 bytes, objects that aren't images, and anything past 500 images or 64 MiB per document (with a warning).
 - **Formats are kept as stored:** PNG, JPEG, GIF, WebP, BMP, TIFF, SVG, EMF or WMF. Nothing is re-encoded.
 - **Where the files go:**
-  - With a destination, they are written to an `images/` folder next to the Markdown, so the references work as-is. The result's `images_dir` says where.
+  - With a destination, they are written to an `images/` folder next to the `.jsonl` file, so the references work once the content is saved next to it. The result's `images_dir` says where.
   - Without one, download them with `GET /_/images/{file}` (token required). They are kept as long as results (`DOCVISION_RESULT_RETENTION`).
 - **In the result**, `images` lists each one:
 
@@ -471,19 +494,17 @@ Revenue grew 12% this quarter.
 
 ### Zip
 
-A zip holds the whole document in one file, ready to unpack and open:
+A zip holds the result and its images in one file:
 
 ```
 report.pdf.zip
-├── report.pdf.md         the Markdown
-├── summary.md            only when a summary was made
-├── report.pdf.fr.md      the translation, with translate_to
+├── report.pdf.jsonl      the result (the Markdown is its content)
 └── images/…              the extracted images (extract_images)
 ```
 
-The Markdown's `images/…` links work once it is unpacked. Files are stored without compression (pictures barely shrink), so the zip is quick to build.
+Files are stored without compression (pictures barely shrink), so the zip is quick to build. The result inside was written just before the zip, so it shows `zip_bytes: 0`.
 
-**When converting:** `"create_zip": true` (async jobs). The zip is written next to the Markdown (`report.pdf.zip`), or, without a destination, kept with the job and downloaded with `GET /_/jobs/{job_id}/zip`. Add `"zip_only": true` to write only the zip and the JSON result, without the separate `.md` and `images/`.
+**When converting:** `"create_zip": true` (async jobs). The zip is written next to the result (`report.pdf.zip`), or, without a destination, kept with the job and downloaded with `GET /_/jobs/{job_id}/zip`. Add `"zip_only": true` to write only the zip, without the separate `.jsonl` and `images/`.
 
 **Later:** every async result carries `zip_file` (where the zip is or will be) and `zip_bytes` (`0` until it exists). To make it afterwards:
 
@@ -499,8 +520,106 @@ The Markdown's `images/…` links work once it is unpacked. Files are stored wit
 - `job.get` and `job.wait` show the same in `zip` (`null` when no zip was asked for).
 - Asking again once the zip exists replies `200` with its size. Two requests at once build it only once.
 - The job must have finished (`409 job_not_finished` / `409 job_failed`), and its result and images must still be stored (`410 expired` / `410 images_expired`; they are kept for `DOCVISION_RESULT_RETENTION`).
-- It contains what the job produced: no summary means no `summary.md`, and images only if `extract_images` was on.
-- A later zip only adds the file; it never removes the `.md` or `images/` already written. The JSON result at the destination is not rewritten, so it still shows `zip_bytes: 0`; use `job.get` or the webhook for the size.
+- A later zip only adds the file; the `.jsonl` at the destination is not rewritten, so it still shows `zip_bytes: 0`; use `job.get` or the webhook for the size.
+
+<br>
+
+### crawl
+
+Crawls a site from a start URL and converts every page exactly like `convert`: same payload, same options and defaults, same fields per page, same webhooks. It always runs in the background, and needs a crawl store (`DOCVISION_CRAWL_STORE`).
+
+```json
+{
+  "operation": "crawl",
+  "payload": {
+    "source": "https://docs.example.com/",
+    "site": "acme-docs",
+    "metadata": {"customer": "acme"},
+    "request": {"headers": {"Authorization": "Bearer …"}},
+    "webhook": {"url": "https://example.com/hook", "events": ["page.finished"]}
+  },
+  "options": {
+    "max_pages": 500,
+    "max_depth": 3,
+    "include": ["/docs/*"],
+    "exclude": ["*/tag/*"]
+  }
+}
+```
+
+Replies `202` with `{"status": "running", "job_id": …, "site": …}`.
+
+**Crawl options** (rejected by `convert`):
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `max_pages` | `100` | Pages fetched in this run, at most 10000. When pages are left, the run ends as `limit_reached` |
+| `max_depth` | `3` | Links followed from the start URL (sitemap pages count as depth 1) |
+| `same_site` | `true` | Only follow links to the start URL's site (`www.` and the bare domain count as one) |
+| `include`, `exclude` | — | Patterns on the URL path and query, `*` matches anything: `["/docs/*"]`, `["*/tag/*", "*?page=*"]` |
+| `use_sitemap` | `true` | Also start from the URLs in the site's sitemaps (`robots.txt` `Sitemap:` lines, or `/sitemap.xml`) |
+| `respect_robots` | `true` | Follow `robots.txt` rules and crawl delay for `*` and `docvision` |
+
+`site` names the site in the store (default: the start URL's host; letters, digits, `.`, `-`, `_`). `destination`, `create_zip` and `zip_only` don't apply.
+
+**How a run works**
+
+- Pages are fetched 2 at a time, with the `robots.txt` crawl delay between fetches. A `429` or `503` is retried once after `Retry-After` (at most 60 s).
+- Links are taken from each HTML page, without `#fragments` and tracking parameters (`utm_*`, `gclid`, `fbclid`), and each URL is fetched once per run. Images, media, scripts and archives are not fetched; PDFs, Office files and other documents are converted.
+- **Unchanged pages are not converted again:** if a page's bytes are the same as in the site's last run, its row is kept and no LLM call is made.
+- With `extract_schema`, every page is extracted with the same schema. With `render`, pages are rendered in the browser like `convert`.
+- `job.get` shows `progress` while it runs (`{"site", "pages": {"converted", "unchanged", "failed", "queued"}}`), and `job.cancel` stops it; pages already saved stay.
+- The run ends as `completed`, `limit_reached`, `cancelled` or `failed`. A run that ends `completed` marks the site's pages it did not reach as `gone`.
+- One crawl per site at a time (`409 crawl_running`, with its `job_id`), and at most `DOCVISION_MAX_CRAWLS` at once (`429`).
+
+**What is saved:** crawls are kept in the crawl store, organized by site, until you delete them:
+
+```
+sites/<site>/pages.jsonl                 the site now: the latest row of every page (gone pages left out)
+sites/<site>/pages/<path>.jsonl          each page's row
+sites/<site>/images/<file>               extracted images (rows link to them as images/<file>)
+sites/<site>/runs/<job_id>/pages.jsonl   the rows one run produced
+```
+
+Each row has the same fields as a `convert` result, plus `url` and `site` (and `operation: "crawl"`). The run's totals are in `job.get`, not on every row, so `llm` holds only `totals`:
+
+```json
+{"schema_version": 2, "operation": "crawl", "job_id": "01a4…", "url": "https://docs.example.com/guide/install", "site": "acme-docs",
+ "status": "completed", "format": "html", "title": "Installing the CLI", "summary": "…", "language": "en", "search": {"…": "…"},
+ "content": "# Installing the CLI\n\n…", "extracted": null, "images": [], "chunks": null, "statistics": {"…": "…"},
+ "feature_status": {"…": "…"}, "warnings": [], "metadata": {"customer": "acme"}, "content_hash": "b3:9f1c…",
+ "llm": {"totals": {"calls": 1, "input_tokens": 3120, "output_tokens": 410, "…": "…"}},
+ "fetched_at": "2026-11-13T10:02:11Z", "converted_at": "2026-11-13T10:02:14Z", "error": null}
+```
+
+A page that failed is a row too, with `status: "failed"` and `error`. `request` values never appear in rows: their `query` parameters are removed from `url`.
+
+**The result** of the run (`job.get` → `result`, and the `job.finished` webhook) says where everything is:
+
+```json
+{"schema_version": 2, "operation": "crawl", "job_id": "01a4…", "status": "completed", "site": "acme-docs",
+ "src_file": "https://docs.example.com/", "pages": {"converted": 212, "unchanged": 40, "failed": 3, "queued": 0},
+ "pages_file": "s3://bucket/crawls/sites/acme-docs/runs/01a4…/pages.jsonl",
+ "site_pages_file": "s3://bucket/crawls/sites/acme-docs/pages.jsonl",
+ "metadata": {"customer": "acme"}, "llm": {"totals": {"…": "…"}}, "timing": {"total_ms": 384200}, "error": null}
+```
+
+The run's rows can also be downloaded with `GET /_/jobs/{job_id}/pages.jsonl` while the run's result is kept.
+
+<br>
+
+### Sites
+
+The database keeps an index of crawled pages; the crawl store holds the pages themselves.
+
+| Operation | Payload | Returns |
+| --- | --- | --- |
+| `site.list` | — | `sites`: each site with its page count, last run and `pages_file` |
+| `site.pages` | `site`, optional `status`, `prefix` (URL prefix), `limit` (1–1000, default 100), `cursor` | `pages` in URL order (url, status, title, content_hash, job_id, dates, error, file) and `next_cursor` |
+| `site.page` | `site`, `url` | That page's index entry plus its full `row` |
+| `site.reindex` | optional `site` | Rebuilds the index from the store (all sites, or one); `{"sites", "pages"}` |
+
+`site.reindex` reads every `sites/<site>/pages/*.jsonl` back, so a lost or new database, or a second deployment pointed at the same store, gets the same index.
 
 <br>
 
@@ -658,9 +777,19 @@ The result keeps `content` (the Markdown) and adds:
 }
 ```
 
-- Returns `job_id`, `request_id`, `status` (`queued`, `running`, `completed`, `partial`, `failed`), timestamps, `error`, `zip` (see [Zip](#zip)), `webhooks` (delivery status) and `result`.
+- Returns `job_id`, `request_id`, `status` (`queued`, `running`, `completed`, `partial`, `failed`; crawls also `limit_reached`, `cancelled`), timestamps, `error`, `zip` (see [Zip](#zip)), `progress` (a running crawl), `webhooks` (delivery status) and `result`.
 - `result` is `null` until the job is done.
 - `fields` limits the result to those top-level fields.
+
+<br>
+
+### job.cancel
+
+```json
+{"operation": "job.cancel", "payload": {"job_id": "01a4…"}}
+```
+
+Stops a running crawl (`202`, `{"status": "cancelling"}`); it ends as `cancelled`, and the pages already saved stay. Other jobs can't be cancelled (`409`).
 
 <br>
 
@@ -704,7 +833,7 @@ Waits for a state change (30 s at most). Returns the same data as `job.get` with
 - `in_progress: true` returns only requests that are `queued` or `running`.
 - `format` filters by detected document format (`pdf`, `docx`, `xlsx`, `pptx`, `html`, `markdown`, `text`, `png`, `jpeg`, `webp`, …).
 - Each item includes `requester_id`, `format`, `llm_provider` and `llm_model` (`null` when no LLM was used), status, timings, statistics and token usage.
-- Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file` and `docv_bytes`. They stay in history after the result itself has expired.
+- Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `zip_file` and `zip_bytes`. They stay in history after the result itself has expired.
 - `cache_hit` says whether the request was served from the result cache.
 - Returns `{"items": [...], "has_more": true, "next_cursor": "…"}`.
 - Pass `next_cursor` back as `cursor` to get the next page.
@@ -791,6 +920,7 @@ Called after an async job finishes (`webhooks` feature). `payload.webhook` is on
 | `secret` | Adds an `x-docvision-signature` header |
 | `body` | Optional JSON template, up to 16 KiB |
 | `fire_and_forget` | `false`. When `true`, one attempt and no retries. Any HTTP response marks it `sent` (the status code is ignored). Only a connection failure marks it `failed` |
+| `events` | Extra events besides `job.finished`: `["page.finished"]` sends each crawled page's row as it is saved |
 
 **Body template**
 
@@ -803,7 +933,9 @@ Called after an async job finishes (`webhooks` feature). `payload.webhook` is on
 | `"$$text"` | The literal string `"$text"` |
 | anything else | Sent unchanged |
 
-Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `md_file`, `md_bytes`, `docv_file`, `docv_bytes`, `images_dir`, `zip_file`, `zip_bytes`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
+Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `operation`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `images_dir`, `zip_file`, `zip_bytes`; for a crawl `site`, `pages`, `pages_file`, `site_pages_file`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
+
+**Page events** (crawls, with `"events": ["page.finished"]`): one `page.finished` event per saved page, with `event_id`, `event`, `job_id`, `request_id` and the page's row (including its `content`), signed and retried like `job.finished`. A receiver can index pages as they arrive instead of waiting for the run to end.
 
 **Zip events:** after `job.zip`, a `zip.completed` or `zip.failed` event (`event_id`, `event`, `job_id`, `request_id`, `status`, `zip_file`, `zip_bytes`, `error`) is sent to the same endpoints, signed and retried the same way, with its own `event_id`. `body` templates apply only to `job.finished`.
 
@@ -844,8 +976,9 @@ Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_i
 The access token grants full use of the service, so treat it like a password and give it only to trusted callers. With it, a caller can:
 
 - **Read local files** the service can read (by absolute path). `/proc`, `/sys` and `/dev` are always refused, after symlinks are resolved, so the process environment and its secrets can't be read. In Docker the service sees only its image and what you mount; mount document folders read-only.
-- **Write destinations** (`.md` plus `.docv.json`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
+- **Write destinations** (`.jsonl` files and `images/`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
 - **Fetch URLs** over `https://` (and `http://` on localhost only), including hosts on your internal network. Webhooks follow the same rule. Run the service where it can only reach what it should.
+- **Render pages and crawl sites** through the browser container. A page's own requests can reach whatever the browser container can reach; link-local and cloud-metadata addresses (`169.254.x.x`, `metadata.google.internal`) are refused, but other internal addresses are not, so give the browser container only the network access it needs. Crawls respect `robots.txt` by default; fetching other people's sites is subject to their terms.
 
 - **Download the database** (`GET /_/db`, SQLite only): the full request history, including sources, metadata and error messages. Stored job secrets (API keys, S3 credentials, webhook headers) stay encrypted inside it.
 
@@ -862,7 +995,7 @@ What the service guarantees:
 
 | Feature | Default | Adds |
 | --- | --- | --- |
-| `s3` | on | S3 sources and destinations |
+| `s3` | on | S3 sources and destinations, `crawl` and the `site.*` operations (the crawl store) |
 | `webhooks` | on | Completion webhooks |
 | `pdf-native` | on | Native PDF text (`ocr: auto` / `off`) and per-batch PDF splitting |
 | `translate` | on | `translate_to` |
@@ -886,9 +1019,9 @@ cargo build --release --no-default-features --features s3,webhooks,pdf-native
 
 ```yaml
 services:
-  docvision-llm-ws:
-    image: ghcr.io/mardix/docvision-llm-ws:latest
-    container_name: docvision-llm-ws
+  docvisionllm:
+    image: ghcr.io/mardix/docvisionllm:latest
+    container_name: docvisionllm
     restart: unless-stopped
     environment:
       DOCVISION_TOKEN: ${DOCVISION_TOKEN:?set DOCVISION_TOKEN}
@@ -896,6 +1029,8 @@ services:
       DOCVISION_LLM_MODEL: ${DOCVISION_LLM_MODEL:-}
       DOCVISION_LLM_API_KEY: ${DOCVISION_LLM_API_KEY:-}
       DOCVISION_LLM_BASE_URL: ${DOCVISION_LLM_BASE_URL:-}
+      DOCVISION_BROWSER_URL: http://browser:9222
+      DOCVISION_CRAWL_STORE: ${DOCVISION_CRAWL_STORE:-}
     ports:
       - "4242:4242"
     volumes:
@@ -905,9 +1040,19 @@ services:
     mem_limit: 512M
     cpus: 1.0
 
+  browser:
+    image: chromedp/headless-shell:latest
+    container_name: docvision-browser
+    restart: unless-stopped
+    shm_size: 1g
+    mem_limit: 2g
+    cpus: 2.0
+
 volumes:
   docvision-data:
 ```
+
+**The browser container** runs headless Chrome for JavaScript pages (`render`, `crawl`), so the service's own image stays small. It has no published port: only the service talks to it. Remove the `browser` service and `DOCVISION_BROWSER_URL` if you don't need rendering; web pages are then converted as fetched.
 
 ```bash
 DOCVISION_TOKEN=your-long-random-token DOCVISION_LLM_MODEL=your-model DOCVISION_LLM_API_KEY=your-key docker compose up -d
@@ -918,13 +1063,13 @@ Compose also reads these values from a `.env` file next to `docker-compose.yml`.
 **Plain Docker:**
 
 ```bash
-docker build -t docvision-llm-ws .
-docker run --read-only -v docvision-data:/data -p 4242:4242 --env-file .env docvision-llm-ws
+docker build -t docvisionllm .
+docker run --read-only -v docvision-data:/data -p 4242:4242 --env-file .env docvisionllm
 ```
 
 - The image is distroless and runs as non-root. `/data` is the only folder it writes to.
 - Mount documents read-only, e.g. `-v /srv/docs:/docs:ro`, then use `"source": "/docs/a.pdf"`.
-- On SIGTERM, running work gets 30 s to finish. Queued jobs resume on restart.
+- On SIGTERM, running work gets 30 s to finish. Queued jobs resume on restart. A crawl that was running ends as failed (`interrupted`); start it again, and the pages it already converted are kept (unchanged pages are not converted again).
 
 <br>
 
@@ -937,4 +1082,4 @@ Requires Rust 1.88 or newer (`rustup update`, or `brew upgrade rust`).
 cargo test --all-features          # uses a mock LLM
 ```
 
-Set `CARGO_TARGET_DIR` outside synced folders (Dropbox, iCloud). `run-local.sh` uses `~/.cache/docvision-llm-ws/target` by default.
+Set `CARGO_TARGET_DIR` outside synced folders (Dropbox, iCloud). `run-local.sh` uses `~/.cache/docvisionllm/target` by default.

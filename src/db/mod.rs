@@ -96,6 +96,23 @@ pub struct EventRow {
     pub detail: Option<String>,
 }
 
+/// A crawled page in the site index (the page itself is in the crawl store).
+#[derive(Debug, Clone, Serialize)]
+pub struct CrawlPageRow {
+    pub site: String,
+    pub url: String,
+    /// Where the page is in the store: `sites/<site>/pages/<page_key>.jsonl`.
+    pub page_key: String,
+    pub job_id: Option<String>,
+    /// `completed`, `partial`, `failed` or `gone`.
+    pub status: String,
+    pub title: Option<String>,
+    pub content_hash: Option<String>,
+    pub fetched_at: Option<i64>,
+    pub converted_at: Option<i64>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WebhookRow {
     pub event_id: String,
@@ -150,6 +167,19 @@ pub enum WriteOp {
         key: String,
     },
     Webhook(WebhookRow),
+    CrawlPage(CrawlPageRow),
+    /// A crawl run started or ended on a site.
+    CrawlSite {
+        site: String,
+        at: i64,
+        job_id: String,
+        status: String,
+    },
+    /// A complete run is over: pages of the site it did not reach are `gone`.
+    CrawlGone {
+        site: String,
+        job_id: String,
+    },
     /// Startup recovery: running jobs -> failed(interrupted), unfinished request logs -> interrupted.
     Recover {
         at: i64,
@@ -371,6 +401,78 @@ impl Db {
     }
 }
 
+impl Db {
+    pub async fn crawl_page(&self, site: &str, url: &str) -> DbResult<Option<CrawlPageRow>> {
+        let r =
+            sqlx::query("SELECT * FROM crawl_pages WHERE site = $1 AND url = $2").bind(site).bind(url).fetch_optional(&self.pool).await?;
+        Ok(r.map(|r| crawl_page_from(&r)))
+    }
+
+    /// A site's pages in URL order, after `after`, optionally filtered by status and URL prefix.
+    pub async fn crawl_pages(
+        &self,
+        site: &str,
+        status: Option<&str>,
+        prefix: Option<&str>,
+        after: &str,
+        limit: i64,
+    ) -> DbResult<Vec<CrawlPageRow>> {
+        let mut sql = String::from("SELECT * FROM crawl_pages WHERE site = $1 AND url > $2");
+        if status.is_some() {
+            sql.push_str(" AND status = $3");
+        }
+        if prefix.is_some() {
+            sql.push_str(if status.is_some() { " AND url LIKE $4 ESCAPE '\\'" } else { " AND url LIKE $3 ESCAPE '\\'" });
+        }
+        sql.push_str(&format!(" ORDER BY url LIMIT {limit}"));
+        let mut q = sqlx::query(&sql).bind(site).bind(after);
+        if let Some(s) = status {
+            q = q.bind(s);
+        }
+        if let Some(p) = prefix {
+            q = q.bind(format!("{}%", p.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")));
+        }
+        Ok(q.fetch_all(&self.pool).await?.iter().map(crawl_page_from).collect())
+    }
+
+    /// Sites with their page counts (pages that exist now): (site, created_at, last_job_id,
+    /// last_run_at, last_status, pages).
+    #[allow(clippy::type_complexity)]
+    pub async fn crawl_sites(&self) -> DbResult<Vec<(String, i64, Option<String>, Option<i64>, Option<String>, i64)>> {
+        let rows = sqlx::query("SELECT s.site, s.created_at, s.last_job_id, s.last_run_at, s.last_status, (SELECT COUNT(*) FROM crawl_pages p WHERE p.site = s.site AND p.status IN ('completed', 'partial')) AS pages FROM crawl_sites s ORDER BY s.site")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    r.get("site"),
+                    r.get("created_at"),
+                    opt_s(r, "last_job_id"),
+                    opt_i(r, "last_run_at"),
+                    opt_s(r, "last_status"),
+                    r.get("pages"),
+                )
+            })
+            .collect())
+    }
+}
+
+fn crawl_page_from(r: &AnyRow) -> CrawlPageRow {
+    CrawlPageRow {
+        site: r.get("site"),
+        url: r.get("url"),
+        page_key: r.get("page_key"),
+        job_id: opt_s(r, "job_id"),
+        status: r.get("status"),
+        title: opt_s(r, "title"),
+        content_hash: opt_s(r, "content_hash"),
+        fetched_at: opt_i(r, "fetched_at"),
+        converted_at: opt_i(r, "converted_at"),
+        error: opt_s(r, "error"),
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct HistoryFilter {
     pub operation: Option<String>,
@@ -419,6 +521,7 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
     (1, include_str!("migrations/0001_init.sqlite.sql"), include_str!("migrations/0001_init.postgres.sql")),
     (2, include_str!("migrations/0002_requester.sql"), include_str!("migrations/0002_requester.sql")),
     (3, include_str!("migrations/0003_format.sql"), include_str!("migrations/0003_format.sql")),
+    (4, include_str!("migrations/0004_crawl.sql"), include_str!("migrations/0004_crawl.sql")),
 ];
 
 async fn migrate(conn: &mut AnyConnection, backend: Backend) -> DbResult<()> {
@@ -529,6 +632,24 @@ pub async fn apply(conn: &mut AnyConnection, op: &WriteOp) -> DbResult<()> {
                 .bind(w.last_error.clone()).bind(w.next_attempt_at).bind(w.created_at).bind(w.delivered_at)
                 .execute(&mut *conn).await?;
         }
+        WriteOp::CrawlPage(p) => {
+            sqlx::query("INSERT INTO crawl_pages (site, url, page_key, job_id, status, title, content_hash, fetched_at, converted_at, error) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (site, url) DO UPDATE SET page_key=excluded.page_key, job_id=excluded.job_id, status=excluded.status, title=excluded.title, content_hash=excluded.content_hash, fetched_at=excluded.fetched_at, converted_at=excluded.converted_at, error=excluded.error")
+                .bind(&p.site).bind(&p.url).bind(&p.page_key).bind(p.job_id.clone()).bind(&p.status).bind(p.title.clone())
+                .bind(p.content_hash.clone()).bind(p.fetched_at).bind(p.converted_at).bind(p.error.clone())
+                .execute(&mut *conn).await?;
+        }
+        WriteOp::CrawlSite { site, at, job_id, status } => {
+            sqlx::query("INSERT INTO crawl_sites (site, created_at, last_job_id, last_run_at, last_status) VALUES ($1,$2,$3,$2,$4) ON CONFLICT (site) DO UPDATE SET last_job_id=excluded.last_job_id, last_run_at=excluded.last_run_at, last_status=excluded.last_status")
+                .bind(site).bind(*at).bind(job_id).bind(status)
+                .execute(&mut *conn).await?;
+        }
+        WriteOp::CrawlGone { site, job_id } => {
+            sqlx::query("UPDATE crawl_pages SET status='gone' WHERE site=$1 AND status IN ('completed', 'partial') AND (job_id IS NULL OR job_id <> $2)")
+                .bind(site)
+                .bind(job_id)
+                .execute(&mut *conn)
+                .await?;
+        }
         WriteOp::Recover { at } => {
             sqlx::query("UPDATE jobs SET state='failed', finished_at=$1, error='{\"code\":\"interrupted\",\"message\":\"service restarted while the job was running\",\"stage\":\"restart\"}' WHERE state='running'")
                 .bind(*at).execute(&mut *conn).await?;
@@ -538,6 +659,7 @@ pub async fn apply(conn: &mut AnyConnection, op: &WriteOp) -> DbResult<()> {
                 .bind(*at)
                 .execute(&mut *conn)
                 .await?;
+            sqlx::query("UPDATE crawl_sites SET last_status='interrupted' WHERE last_status='running'").execute(&mut *conn).await?;
         }
         WriteOp::Retention { result_cutoff, history_cutoff, limit } => {
             sqlx::query("DELETE FROM result_cache WHERE cache_key IN (SELECT cache_key FROM result_cache WHERE created_at < $1 LIMIT $2)")

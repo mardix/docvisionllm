@@ -1,7 +1,7 @@
 //! Property tests: chunking never loses or reorders content; DSN parsing round-trips.
 
-use docvision_llm_ws::markdown::{analyze, apply_overlap, normalize};
-use docvision_llm_ws::source::parse_s3;
+use docvisionllm::markdown::{analyze, apply_overlap, normalize};
+use docvisionllm::source::parse_s3;
 use proptest::prelude::*;
 
 fn markdown_line() -> impl Strategy<Value = String> {

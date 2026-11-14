@@ -43,7 +43,7 @@ impl Writer {
                     mpsc::error::TrySendError::Full(Msg::One(op, _)) | mpsc::error::TrySendError::Closed(Msg::One(op, _)) => Some(op),
                     _ => None,
                 };
-                tracing::warn!(target: "docvision_llm_ws::writer", fallback = true, op = ?op.map(|o| op_name(&o)), "db writer unavailable; write dropped");
+                tracing::warn!(target: "docvisionllm::writer", fallback = true, op = ?op.map(|o| op_name(&o)), "db writer unavailable; write dropped");
                 false
             }
         }
@@ -94,6 +94,9 @@ fn op_name(op: &WriteOp) -> &'static str {
         WriteOp::CachePut { .. } => "cache_put",
         WriteOp::CacheDelete { .. } => "cache_delete",
         WriteOp::Webhook(_) => "webhook",
+        WriteOp::CrawlPage(_) => "crawl_page",
+        WriteOp::CrawlSite { .. } => "crawl_site",
+        WriteOp::CrawlGone { .. } => "crawl_gone",
         WriteOp::Recover { .. } => "recover",
         WriteOp::Retention { .. } => "retention",
     }
@@ -138,13 +141,13 @@ async fn run(mut conn: sqlx::AnyConnection, mut rx: mpsc::Receiver<Msg>, metrics
         let results: Vec<bool> = match commit(&mut conn, &batch).await {
             Ok(()) => vec![true; batch.len()],
             Err(e) => {
-                tracing::error!(target: "docvision_llm_ws::writer", error = %e, "batch commit failed; retrying ops individually");
+                tracing::error!(target: "docvisionllm::writer", error = %e, "batch commit failed; retrying ops individually");
                 // Isolate the poison op: commit each message on its own.
                 let mut r = Vec::with_capacity(batch.len());
                 for m in batch.iter() {
                     let res = commit(&mut conn, std::slice::from_ref(m)).await;
                     if let Err(e) = &res {
-                        tracing::error!(target: "docvision_llm_ws::writer", error = %e, "write op failed");
+                        tracing::error!(target: "docvisionllm::writer", error = %e, "write op failed");
                     }
                     r.push(res.is_ok());
                 }

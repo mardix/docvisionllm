@@ -11,7 +11,7 @@ use serde_json::json;
 #[tokio::test]
 async fn odf_and_epub() {
     let s = server().await;
-    let local = json!({"summary_method": "local", "title_method": "local"});
+    let local = json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false});
     let p = s.write("a.odt", &fixtures::odt());
     let (st, v) = s.convert_sync(&p, local.clone()).await;
     assert_eq!(st, 200, "{v}");
@@ -56,7 +56,8 @@ async fn local_language_detection() {
     let s = server().await;
     let en = "# Report\n\nThe quick brown fox jumps over the lazy dog. This document is written in plain English and describes the results of the quarterly review in detail.\n";
     let p = s.write("en.md", en.as_bytes());
-    let (st, v) = s.convert_sync(&p, json!({"detect_language": true, "gen_summary": false, "gen_title": false})).await;
+    let (st, v) =
+        s.convert_sync(&p, json!({"language_method": "local", "gen_search": false, "gen_summary": false, "gen_title": false})).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["data"]["language"], "en");
     assert_eq!(v["data"]["language_detection"]["method"], "local_whatlang");
@@ -65,7 +66,12 @@ async fn local_language_detection() {
         "{en}\n## Teil\n\nDies ist ein ausführlicher deutscher Absatz über die Ergebnisse der vierteljährlichen Überprüfung und die nächsten Schritte für das Team.\n\n## Partie\n\nCeci est un long paragraphe en français qui décrit les résultats de la revue trimestrielle et les prochaines étapes.\n"
     );
     let p = s.write("mixed.md", mixed.as_bytes());
-    let (_, v) = s.convert_sync(&p, json!({"detect_language": true, "gen_summary": false, "gen_title": false, "chunk_size": 16})).await;
+    let (_, v) = s
+        .convert_sync(
+            &p,
+            json!({"language_method": "local", "gen_search": false, "gen_summary": false, "gen_title": false, "chunk_size": 16}),
+        )
+        .await;
     assert_eq!(v["data"]["language"], "mul", "{}", v["data"]["language_detection"]);
 }
 

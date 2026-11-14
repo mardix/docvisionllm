@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use docvision_llm_ws::db::{RequestRow, WriteOp, now_ms};
+use docvisionllm::db::{RequestRow, WriteOp, now_ms};
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
@@ -116,7 +116,7 @@ fn restart_recovery_after_kill() {
     mock.set_latency(1500, 1500);
     let mock_url = mrt.block_on(mock::spawn(mock.clone()));
     let dir = temp_dir("restart");
-    let tweak = |v: &mut docvision_llm_ws::config::Vars| {
+    let tweak = |v: &mut docvisionllm::config::Vars| {
         v.insert("DOCVISION_MAX_CONCURRENT_JOBS".into(), "1".into());
     };
 
@@ -126,8 +126,13 @@ fn restart_recovery_after_kill() {
         let mut ids = Vec::new();
         for i in 0..3 {
             let p = s.write(&format!("r{i}.pdf"), &fixtures::pdf(1));
-            let (st, v) =
-                s.rpc("convert", json!({"source": p}), json!({"cache": "bypass", "gen_summary": false, "gen_title": false})).await;
+            let (st, v) = s
+                .rpc(
+                    "convert",
+                    json!({"source": p}),
+                    json!({"cache": "bypass", "gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}),
+                )
+                .await;
             assert_eq!(st, 202);
             ids.push(v["data"]["job_id"].as_str().unwrap().to_string());
         }
@@ -169,7 +174,13 @@ fn restart_recovery_after_kill() {
 async fn retention_is_independent_for_results_and_history() {
     let s = server().await;
     let p = s.write("a.md", b"# A\n\ntext\n");
-    let (_, v) = s.rpc("convert", json!({"source": p}), json!({"summary_method": "local", "title_method": "local"})).await;
+    let (_, v) = s
+        .rpc(
+            "convert",
+            json!({"source": p}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}),
+        )
+        .await;
     let job_id = v["data"]["job_id"].as_str().unwrap().to_string();
     s.wait_job(&job_id).await;
     s.flush().await;
@@ -227,7 +238,7 @@ async fn webhooks_sign_retry_and_dedupe() {
         .rpc(
             "convert",
             json!({"source": p, "metadata": {"reference": "abc"}, "webhook": {"url": url, "headers": {"Authorization": "Bearer cb-token"}, "secret": "hmac-secret"}}),
-            json!({"summary_method": "local", "title_method": "local"}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     assert_eq!(st, 202, "{v}");
@@ -246,7 +257,7 @@ async fn webhooks_sign_retry_and_dedupe() {
     let (h, body) = &hits[1];
     assert_eq!(h["authorization"], "Bearer cb-token");
     let ts = h["x-docvision-timestamp"].to_str().unwrap();
-    assert_eq!(h["x-docvision-signature"].to_str().unwrap(), docvision_llm_ws::webhook::sign("hmac-secret", ts, body));
+    assert_eq!(h["x-docvision-signature"].to_str().unwrap(), docvisionllm::webhook::sign("hmac-secret", ts, body));
     let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
     assert_eq!(payload["job_id"], job_id.as_str());
     assert_eq!(payload["metadata"]["reference"], "abc");
@@ -256,8 +267,8 @@ async fn webhooks_sign_retry_and_dedupe() {
     assert!(payload.get("content").is_none(), "reference payloads carry no content");
     // The event says where things are and how big, so the receiver can decide what to fetch.
     assert_eq!(payload["src_file"], job["result"]["src_file"]);
-    assert!(payload["src_bytes"].as_u64().unwrap() > 0 && payload["md_bytes"].as_u64().unwrap() > 0, "{payload}");
-    assert!(payload["md_file"].is_null() && payload["docv_file"].is_null(), "no destination was requested");
+    assert!(payload["src_bytes"].as_u64().unwrap() > 0 && payload["operation"] == "convert", "{payload}");
+    assert!(payload["output_file"].is_null() && payload.get("output_bytes").is_none(), "no destination was requested");
     s.flush().await;
     let (_, g) = s.rpc("job.get", json!({"job_id": job_id, "fields": ["status"]}), json!({})).await;
     let wh = &g["data"]["webhooks"][0];
@@ -284,7 +295,7 @@ async fn secrets_never_reach_storage_or_responses() {
     } else {
         json!({"source": p})
     };
-    let (_, v) = s.rpc("convert", payload, json!({"llm_api_key": secret_key, "summary_method": "local", "title_method": "local"})).await;
+    let (_, v) = s.rpc("convert", payload, json!({"llm_api_key": secret_key, "summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false})).await;
     s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     s.flush().await;
     let (_, h) = s.rpc("history.list", json!({"limit": 100}), json!({})).await;
@@ -319,7 +330,7 @@ async fn full_webhook_streams_result_with_valid_signature() {
         .rpc(
             "convert",
             json!({"source": p, "webhook": {"url": url, "secret": "s3cr3t", "body": "$"}}),
-            json!({"summary_method": "local", "title_method": "local"}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     let job_id = v["data"]["job_id"].as_str().unwrap().to_string();
@@ -335,7 +346,7 @@ async fn full_webhook_streams_result_with_valid_signature() {
     assert_eq!(full["job_id"], job_id.as_str());
     assert!(full["content"].as_str().unwrap().contains("# Section 1"));
     let ts = h["x-docvision-timestamp"].to_str().unwrap();
-    assert_eq!(h["x-docvision-signature"].to_str().unwrap(), docvision_llm_ws::webhook::sign("s3cr3t", ts, &body));
+    assert_eq!(h["x-docvision-signature"].to_str().unwrap(), docvisionllm::webhook::sign("s3cr3t", ts, &body));
 }
 
 #[cfg(feature = "webhooks")]
@@ -350,7 +361,7 @@ async fn templated_webhook_body() {
         .rpc(
             "convert",
             json!({"source": p, "webhook": {"url": url, "body": body}}),
-            json!({"summary_method": "local", "title_method": "local"}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false, "gen_chunks": true}),
         )
         .await;
     s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
@@ -374,7 +385,9 @@ async fn templated_webhook_body() {
 async fn stats_and_dashboard() {
     let s = server().await;
     let p = s.write("d.docx", &fixtures::docx(1));
-    let (st, _) = s.convert_sync(&p, json!({"summary_method": "local", "title_method": "local"})).await;
+    let (st, _) = s
+        .convert_sync(&p, json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}))
+        .await;
     assert_eq!(st, 200);
     let (st, _) = s.convert_sync("/missing/file.md", json!({})).await;
     assert_eq!(st, 404);
@@ -398,7 +411,7 @@ async fn stats_and_dashboard() {
     assert_eq!(r.status(), 200);
     assert!(r.headers()["content-security-policy"].to_str().unwrap().contains("connect-src 'self'"));
     let html = r.text().await.unwrap();
-    assert!(html.contains("DOCVISION-LLM dashboard") && !html.contains(TOKEN));
+    assert!(html.contains("DOCVISIONLLM dashboard") && !html.contains(TOKEN));
     let r = s.client.post(format!("{}/rpc", s.url)).json(&json!({"operation": "stats"})).send().await.unwrap();
     assert_eq!(r.status(), 401);
 }
@@ -416,8 +429,13 @@ async fn multiple_webhooks_and_fire_and_forget() {
         {"url": ok_url, "body": {"title": "$.title"}},
         {"url": down_url, "fire_and_forget": true}
     ]);
-    let (st, v) =
-        s.rpc("convert", json!({"source": p, "webhook": hooks}), json!({"summary_method": "local", "title_method": "local"})).await;
+    let (st, v) = s
+        .rpc(
+            "convert",
+            json!({"source": p, "webhook": hooks}),
+            json!({"summary_method": "local", "title_method": "local", "detect_language": false, "gen_search": false}),
+        )
+        .await;
     assert_eq!(st, 202, "{v}");
     let job_id = v["data"]["job_id"].as_str().unwrap().to_string();
     s.wait_job(&job_id).await;
@@ -464,7 +482,12 @@ async fn requester_model_in_progress_and_doc_page() {
     s.wait_job(&job_id).await;
 
     let md = s.write("n.md", b"# Notes\n\nSome text here.\n");
-    assert_eq!(s.convert_sync(&md, json!({"title_method": "local", "summary_method": "local"})).await.0, 200);
+    assert_eq!(
+        s.convert_sync(&md, json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}))
+            .await
+            .0,
+        200
+    );
     assert_eq!(s.rpc("chunk", json!({"source_content": "# A\n\nB.\n", "requester_id": "team-b"}), json!({})).await.0, 200);
     assert_eq!(s.rpc("chunk", json!({"source_content": "x", "requester_id": "bad\nid"}), json!({})).await.0, 400);
     s.flush().await;
@@ -498,14 +521,19 @@ async fn requester_model_in_progress_and_doc_page() {
     let r = s.client.get(format!("{}/_/doc", s.url)).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let html = r.text().await.unwrap();
-    assert!(html.contains("id=\"webhooks\"") && html.contains("<table>") && html.contains("/_/dashboard"));
+    assert!(html.contains("id=\"webhooks\"") && html.contains("<table>") && !html.contains("href=\"/_/dashboard\""));
 }
 
 #[tokio::test]
 async fn database_download() {
     let s = server().await;
     let p = s.write("n.md", b"# Notes\n\nSome text.\n");
-    assert_eq!(s.convert_sync(&p, json!({"title_method": "local", "summary_method": "local"})).await.0, 200);
+    assert_eq!(
+        s.convert_sync(&p, json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}))
+            .await
+            .0,
+        200
+    );
     s.flush().await;
     // The token is required.
     assert_eq!(s.client.get(format!("{}/_/db", s.url)).send().await.unwrap().status(), 401);

@@ -14,7 +14,7 @@ async fn async_default_job_get_and_fields() {
         .rpc(
             "convert",
             json!({"source": p, "metadata": {"reference": "ref-1"}}),
-            json!({"title_method": "local", "summary_method": "local"}),
+            json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false}),
         )
         .await;
     assert_eq!(st, 202, "{v}");
@@ -53,7 +53,12 @@ async fn pdf_ocr_on_batches_and_counts_pages() {
     })
     .await;
     let p = s.write("scan.pdf", &fixtures::pdf(20));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false})).await;
+    let (st, v) = s
+        .convert_sync(
+            &p,
+            json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false, "gen_chunks": true}),
+        )
+        .await;
     assert_eq!(st, 200, "{v}");
     let d = &v["data"];
     assert_eq!(d["statistics"]["original_total_pages"], 20);
@@ -78,7 +83,8 @@ async fn pdf_ocr_on_batches_and_counts_pages() {
 async fn pdf_is_split_per_batch() {
     let s = server().await;
     let p = s.write("big.pdf", &fixtures::text_pdf(20, &[]));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false})).await;
+    let (st, v) =
+        s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false})).await;
     assert_eq!(st, 200, "{v}");
     let c = v["data"]["content"].as_str().unwrap();
     let positions: Vec<usize> = (1..=20).map(|i| c.find(&format!("## Page {i}\n")).unwrap()).collect();
@@ -94,7 +100,12 @@ async fn pdf_is_split_per_batch() {
     // A truncated piece is cut in half again: 1-8 -> 1-4 + 5-8 -> ... -> single pages.
     s.mock.pdf_pages_seen.lock().unwrap().clear();
     s.mock.truncate_multi_page.store(true, SeqCst);
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "cache": "bypass"})).await;
+    let (st, v) = s
+        .convert_sync(
+            &p,
+            json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false, "cache": "bypass"}),
+        )
+        .await;
     assert_eq!(st, 200, "{v}");
     let c = v["data"]["content"].as_str().unwrap();
     assert!((1..=20).all(|i| c.contains(&format!("## Page {i}\n"))), "{c}");
@@ -107,7 +118,8 @@ async fn pdf_truncation_splits_batches() {
     let s = server().await;
     s.mock.truncate_multi_page.store(true, SeqCst);
     let p = s.write("t.pdf", &fixtures::pdf(4));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false})).await;
+    let (st, v) =
+        s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false})).await;
     assert_eq!(st, 200, "{v}");
     let c = v["data"]["content"].as_str().unwrap();
     for i in 1..=4 {
@@ -124,7 +136,9 @@ async fn pdf_truncation_splits_batches() {
 async fn pdf_auto_and_off_modes() {
     let s = server().await;
     let p = s.write("mixed.pdf", &fixtures::text_pdf(5, &[3, 4]));
-    let (st, v) = s.convert_sync(&p, json!({"ocr": "auto", "gen_summary": false, "gen_title": false})).await;
+    let (st, v) = s
+        .convert_sync(&p, json!({"ocr": "auto", "gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}))
+        .await;
     assert_eq!(st, 200, "{v}");
     let c = v["data"]["content"].as_str().unwrap();
     assert!(c.contains("native text on page 1"), "{c}");
@@ -134,17 +148,21 @@ async fn pdf_auto_and_off_modes() {
     assert_eq!(s.mock.transcriptions.load(SeqCst), 1, "pages 3-4 OCR'd in one batch");
     assert_eq!(v["data"]["statistics"]["original_total_pages"], 5);
     // ocr=off with scanned pages -> 422, or a marked partial result.
-    let (st, v) = s.convert_sync(&p, json!({"ocr": "off", "gen_summary": false, "gen_title": false})).await;
+    let (st, v) = s
+        .convert_sync(&p, json!({"ocr": "off", "gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}))
+        .await;
     assert_eq!(st, 422, "{v}");
     assert_eq!(v["error"]["code"], "scanned_pages");
-    let (st, v) = s.convert_sync(&p, json!({"ocr": "off", "allow_partial": true, "gen_summary": false, "gen_title": false})).await;
+    let (st, v) = s.convert_sync(&p, json!({"ocr": "off", "allow_partial": true, "gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false})).await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["data"]["status"], "partial");
     assert!(v["data"]["warnings"].to_string().contains("ocr=off"));
     // A clean text PDF with ocr=off makes zero calls.
     let before = s.mock.requests.load(SeqCst);
     let p = s.write("clean.pdf", &fixtures::text_pdf(2, &[]));
-    let (st, v) = s.convert_sync(&p, json!({"ocr": "off", "gen_summary": false, "gen_title": false})).await;
+    let (st, v) = s
+        .convert_sync(&p, json!({"ocr": "off", "gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}))
+        .await;
     assert_eq!(st, 200, "{v}");
     assert_eq!(s.mock.requests.load(SeqCst), before);
 }
@@ -153,7 +171,8 @@ async fn pdf_auto_and_off_modes() {
 async fn images_via_vision() {
     let s = server().await;
     let p = s.write("pic.png", &fixtures::png(800, 600));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false})).await;
+    let (st, v) =
+        s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false})).await;
     assert_eq!(st, 200, "{v}");
     assert!(v["data"]["content"].as_str().unwrap().contains("Mock image text."));
     assert_eq!(v["data"]["statistics"]["original_total_pages"], 1);
@@ -197,7 +216,8 @@ async fn retries_and_accounting_on_failures() {
     *s.mock.p5xx.lock().unwrap() = 0.0;
     s.mock.omit_usage.store(true, SeqCst);
     let p = s.write("b.pdf", &fixtures::pdf(1));
-    let (st, v) = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false})).await;
+    let (st, v) =
+        s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false})).await;
     assert_eq!(st, 200, "{v}");
     assert!(v["data"]["llm"]["totals"]["input_tokens"].is_null());
     assert_eq!(v["data"]["llm"]["totals"]["usage_complete"], false);
@@ -228,7 +248,7 @@ async fn cancellation_finalizes_call_records() {
     let s = server().await;
     s.mock.set_latency(2000, 2000);
     let p = s.write("slow.pdf", &fixtures::pdf(1));
-    let fut = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false}));
+    let fut = s.convert_sync(&p, json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}));
     // Client gives up after 300 ms -> the request future is dropped server-side.
     let _ = tokio::time::timeout(std::time::Duration::from_millis(300), fut).await;
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -248,7 +268,7 @@ async fn single_flight_and_cache() {
     let s = server().await;
     s.mock.set_latency(300, 300);
     let p = s.write("same.pdf", &fixtures::pdf(2));
-    let opts = json!({"gen_summary": false, "gen_title": false});
+    let opts = json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false});
     // 50 identical concurrent submissions -> one provider conversion.
     let futs = (0..50).map(|_| s.rpc("convert", json!({"source": p}), opts.clone()));
     let res = futures_util::future::join_all(futs).await;
@@ -293,76 +313,70 @@ async fn single_flight_and_cache() {
 }
 
 #[tokio::test]
-async fn destinations_local_with_markdown() {
+async fn destinations_local_jsonl() {
     let s = server().await;
     let p = s.write("d.docx", &fixtures::docx(1));
     let out = s.dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
-    let dest = out.join("report.md");
-    let opts = json!({"title_method": "local", "summary_method": "local"});
+    let dest = out.join("report.jsonl");
+    let opts = json!({"title_method": "local", "summary_method": "local", "detect_language": false, "gen_search": false});
+    // Only .jsonl files or folders.
+    let (st, _) = s.rpc("convert", json!({"source": p, "destination": out.join("report.md").to_str().unwrap()}), opts.clone()).await;
+    assert_eq!(st, 400);
     let (st, v) = s.rpc("convert", json!({"source": p, "destination": dest.to_str().unwrap()}), opts.clone()).await;
     assert_eq!(st, 202, "{v}");
-    let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
+    let job_id = v["data"]["job_id"].as_str().unwrap().to_string();
+    let j = s.wait_job(&job_id).await;
     assert_eq!(j["status"], "completed", "{j}");
-    let json_bytes = std::fs::read(out.join("report.docv.json")).unwrap();
-    let md = std::fs::read_to_string(&dest).unwrap();
-    let published: Value = serde_json::from_slice(&json_bytes).unwrap();
-    assert_eq!(published["content"].as_str().unwrap(), md);
-    assert_eq!(published["dest_file"].as_str().map(|d| d.ends_with("report.md")), Some(true), "{published}");
-    assert_eq!(published["md_file"], published["dest_file"], "a .md destination is where the Markdown goes");
-    assert!(published["docv_file"].as_str().unwrap().ends_with("report.docv.json"));
-    // Sizes sit next to the paths; the JSON's own size is exact even though it contains itself.
-    assert_eq!(published["docv_bytes"].as_u64().unwrap(), json_bytes.len() as u64, "self-referential size is exact");
-    assert_eq!(published["md_bytes"].as_u64().unwrap(), md.len() as u64);
-    assert_eq!(published["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len());
-    assert!(published.get("files").is_none(), "the files list was replaced by the *_file / *_bytes fields");
+    let bytes = std::fs::read(&dest).unwrap();
+    assert!(bytes.ends_with(b"}\n") && bytes.iter().filter(|b| **b == b'\n').count() == 1, "one JSON Lines record");
+    assert!(!out.join("report.md").exists() && !out.join("report.docv.json").exists(), "no .md or .docv.json any more");
+    let line: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!((line["operation"].as_str(), line["job_id"].as_str()), (Some("convert"), Some(job_id.as_str())));
+    assert_eq!(line["output_file"], dest.to_str().unwrap());
+    assert!(line["content"].as_str().unwrap().contains("Quarterly"), "the Markdown is the content field");
+    assert!(line.get("output_bytes").is_none(), "a file does not contain its own size");
+    assert_eq!(line["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len());
+    assert!(line["converted_at"].is_string() && line["content_hash"].as_str().unwrap().starts_with("b3:"));
+    // The API result is the same record.
+    assert_eq!(j["result"], line);
     // Existing files are replaced by default.
-    let (_, v) = s
-        .rpc(
-            "convert",
-            json!({"source": p, "destination": dest.to_str().unwrap()}),
-            json!({"cache": "bypass", "title_method": "local", "summary_method": "local"}),
-        )
-        .await;
+    let mut o = opts.clone();
+    o["cache"] = json!("bypass");
+    let (_, v) = s.rpc("convert", json!({"source": p, "destination": dest.to_str().unwrap()}), o.clone()).await;
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "completed", "{j}");
-    // A folder destination names the outputs after the source file, extension kept.
+    // A folder destination names the output after the source file, extension kept.
     let folder = format!("{}/", out.display());
-    let (_, v) =
-        s.rpc("convert", json!({"source": p, "destination": folder}), json!({"title_method": "local", "summary_method": "local"})).await;
+    let (_, v) = s.rpc("convert", json!({"source": p, "destination": folder}), opts.clone()).await;
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "completed", "{j}");
-    assert!(out.join("d.docx.md").exists() && out.join("d.docx.docv.json").exists());
     let r = &j["result"];
     assert_eq!(r["dest_file"], folder.as_str(), "the destination as requested");
-    assert!(r["md_file"].as_str().unwrap().ends_with("/out/d.docx.md"), "{r}");
-    assert!(r["docv_file"].as_str().unwrap().ends_with("/out/d.docx.docv.json"));
-    assert!(r["src_file"].as_str().unwrap().ends_with("d.docx"));
-    // History keeps the same paths and sizes (shown by the dashboard), outside `statistics`.
+    assert!(r["output_file"].as_str().unwrap().ends_with("/out/d.docx.jsonl"), "{r}");
+    // History keeps the path and the file's size.
     s.flush().await;
     let (_, h) = s.rpc("history.get", json!({"request_id": j["request_id"]}), json!({})).await;
     let q = &h["data"]["request"];
-    assert_eq!(q["dest_file"], folder.as_str(), "{q}");
-    assert_eq!(q["md_file"], r["md_file"]);
-    assert_eq!(q["docv_file"], r["docv_file"]);
-    assert_eq!(q["md_bytes"], r["md_bytes"]);
-    assert_eq!(q["src_bytes"], r["src_bytes"]);
-    assert_eq!(q["docv_bytes"].as_u64().unwrap(), std::fs::metadata(out.join("d.docx.docv.json")).unwrap().len());
-    assert!(q["statistics"].get("files").is_none() && q["statistics"]["total_words"].as_u64().unwrap() > 0);
+    assert_eq!(q["output_file"], r["output_file"], "{q}");
+    assert_eq!(q["output_bytes"].as_u64().unwrap(), std::fs::metadata(out.join("d.docx.jsonl")).unwrap().len());
+    // The rows route returns the same line.
+    let rows = s
+        .client
+        .get(format!("{}/_/jobs/{}/pages.jsonl", s.url, j["job_id"].as_str().unwrap()))
+        .header("x-access-token", TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rows.status(), 200);
+    assert_eq!(serde_json::from_slice::<Value>(&rows.bytes().await.unwrap()).unwrap()["output_file"], r["output_file"]);
     // overwrite=false on an existing destination fails, and does not claim the write.
-    let (_, v) = s
-        .rpc(
-            "convert",
-            json!({"source": p, "destination": dest.to_str().unwrap()}),
-            json!({"cache": "bypass", "overwrite": false, "title_method": "local", "summary_method": "local"}),
-        )
-        .await;
+    o["overwrite"] = json!(false);
+    let (_, v) = s.rpc("convert", json!({"source": p, "destination": dest.to_str().unwrap()}), o).await;
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "failed", "{j}");
     assert_eq!(j["error"]["code"], "destination_exists");
-    let r = &j["result"];
-    assert!(r["md_file"].is_null() && r["docv_file"].is_null() && r["docv_bytes"].is_null(), "nothing was written: {r}");
-    assert!(r["md_bytes"].as_u64().unwrap() > 0 && r["src_bytes"].as_u64().unwrap() > 0, "sizes are known even so");
+    assert!(j["result"]["output_file"].is_null(), "nothing was written");
 }
 
 #[tokio::test]
@@ -381,7 +395,7 @@ async fn queue_full_returns_429_with_retry_after() {
             .client
             .post(format!("{}/rpc", s.url))
             .header("x-access-token", TOKEN)
-            .json(&json!({"operation": "convert", "payload": {"source": p}, "options": {"gen_summary": false, "gen_title": false}}))
+            .json(&json!({"operation": "convert", "payload": {"source": p}, "options": {"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false}}))
             .send()
             .await
             .unwrap();
@@ -420,7 +434,13 @@ async fn throughput_settles_under_provider_rate_limits() {
     let mut ids = Vec::new();
     for i in 0..40 {
         let p = s.write(&format!("r{i}.pdf"), &fixtures::pdf(1 + i % 3));
-        let (st, v) = s.rpc("convert", json!({"source": p}), json!({"gen_summary": false, "gen_title": false, "cache": "bypass"})).await;
+        let (st, v) = s
+            .rpc(
+                "convert",
+                json!({"source": p}),
+                json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false, "cache": "bypass"}),
+            )
+            .await;
         assert_eq!(st, 202);
         ids.push(v["data"]["job_id"].as_str().unwrap().to_string());
     }
@@ -439,7 +459,7 @@ async fn throughput_settles_under_provider_rate_limits() {
 async fn llm_markdown_wrappers_are_removed() {
     let s = server().await;
     s.mock.wrap_markdown.store(true, SeqCst);
-    let opts = json!({"gen_summary": false, "gen_title": false});
+    let opts = json!({"gen_summary": false, "gen_title": false, "gen_search": false, "detect_language": false});
     let p = s.write("w.pdf", &fixtures::pdf(3));
     let (st, v) = s.convert_sync(&p, opts.clone()).await;
     assert_eq!(st, 200, "{v}");

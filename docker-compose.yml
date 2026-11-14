@@ -1,7 +1,7 @@
 services:
-  docvision-llm-ws:
-    image: ghcr.io/mardix/docvision-llm-ws:latest
-    container_name: docvision-llm-ws
+  docvisionllm:
+    image: ghcr.io/mardix/docvisionllm:latest
+    container_name: docvisionllm
     restart: unless-stopped
     environment:
       # Required: access token (at least 16 characters).
@@ -12,6 +12,10 @@ services:
       DOCVISION_LLM_MODEL: ${DOCVISION_LLM_MODEL:-}
       DOCVISION_LLM_API_KEY: ${DOCVISION_LLM_API_KEY:-}
       DOCVISION_LLM_BASE_URL: ${DOCVISION_LLM_BASE_URL:-}
+      # Headless Chrome for JavaScript pages (the `browser` service below).
+      DOCVISION_BROWSER_URL: http://browser:9222
+      # Where crawled sites are kept: s3://bucket/crawls/ or a folder on a volume. Needed for `crawl`.
+      DOCVISION_CRAWL_STORE: ${DOCVISION_CRAWL_STORE:-}
     ports:
       - "4242:4242"
     volumes:
@@ -22,6 +26,16 @@ services:
     # Conversions stay within 60% of this limit.
     mem_limit: 512M
     cpus: 1.0
+
+  # Headless Chrome in its own container, so the service stays small. It renders pages for
+  # `render` / `crawl` and is reachable only from the service (no published port).
+  browser:
+    image: chromedp/headless-shell:latest
+    container_name: docvision-browser
+    restart: unless-stopped
+    shm_size: 1g
+    mem_limit: 2g
+    cpus: 2.0
 
 volumes:
   docvision-data:

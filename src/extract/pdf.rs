@@ -352,7 +352,7 @@ async fn split(l: &Llm<'_>, att: &Att, ranges: &[(u32, u32)]) -> Option<Vec<Arc<
         let paths = match l.app.cpu.run(move || split_pdf(&src, first, &rs, &dir)).await {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
-                tracing::debug!(target: "docvision_llm_ws::pdf", error = %e, "PDF not split; sending it whole");
+                tracing::debug!(target: "docvisionllm::pdf", error = %e, "PDF not split; sending it whole");
                 return None;
             }
             Err(_) => return None,

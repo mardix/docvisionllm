@@ -1,5 +1,5 @@
 [package]
-name = "docvision-llm-ws"
+name = "docvisionllm"
 version = "0.4.0"
 edition = "2024"
 rust-version = "1.88"
@@ -8,11 +8,11 @@ license = "MIT"
 publish = false
 
 [lib]
-name = "docvision_llm_ws"
+name = "docvisionllm"
 path = "src/lib.rs"
 
 [[bin]]
-name = "docvision-llm-ws"
+name = "docvisionllm"
 path = "src/main.rs"
 
 [features]
@@ -47,6 +47,7 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 imagesize = { version = "0.13", default-features = false }
 unicode-segmentation = { version = "1", default-features = false }
 url = { version = "2", default-features = false }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect"] }
 percent-encoding = { version = "2", default-features = false, features = ["std"] }
 subtle = { version = "2", default-features = false }
 uuid = { version = "1", default-features = false, features = ["v7", "std"] }

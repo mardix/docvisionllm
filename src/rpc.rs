@@ -170,7 +170,7 @@ pub async fn dashboard() -> Response {
     h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
     h.insert(
         header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"),
+        HeaderValue::from_static("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'"),
     );
     h.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
@@ -262,6 +262,35 @@ pub async fn zip_file(
     r
 }
 
+/// `GET /_/jobs/{job_id}/pages.jsonl`: a job's rows as JSON Lines (token required): the pages a
+/// crawl run produced, or the one row of a `convert` job.
+pub async fn pages_file(
+    State(app): State<Arc<App>>,
+    headers: HeaderMap,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Response {
+    if !authorized(&app, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let missing = || (StatusCode::NOT_FOUND, "no rows for this job (results are kept for DOCVISION_RESULT_RETENTION)").into_response();
+    if job_id.is_empty() || job_id.len() > 64 || !job_id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+        return missing();
+    }
+    let dir = app.results_dir();
+    let file = match tokio::fs::File::open(dir.join(format!("{job_id}.pages.jsonl"))).await {
+        Ok(f) => f,
+        Err(_) => match tokio::fs::File::open(dir.join(format!("{job_id}.json"))).await {
+            Ok(f) => f,
+            Err(_) => return missing(),
+        },
+    };
+    let mut r = Response::new(Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, 64 * 1024)));
+    let h = r.headers_mut();
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/jsonl"));
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    r
+}
+
 /// `GET /_/db`: download a snapshot of the SQLite database (token required).
 pub async fn db_download(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if !authorized(&app, &headers) {
@@ -283,7 +312,7 @@ pub async fn db_download(State(app): State<Arc<App>>, headers: HeaderMap) -> Res
     let (file, len) = match opened {
         Ok(v) => v,
         Err(e) => {
-            tracing::error!(target: "docvision_llm_ws::db", error = %e, "database snapshot failed");
+            tracing::error!(target: "docvisionllm::db", error = %e, "database snapshot failed");
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not create a database snapshot").into_response();
         }
     };
@@ -372,11 +401,40 @@ async fn dispatch(app: &Arc<App>, ctx: &mut ReqCtx, headers: &HeaderMap, body: &
         "job.get" => crate::jobs::job_get(app, ctx, env.payload).await,
         "job.wait" => crate::jobs::job_wait(app, ctx, env.payload).await,
         "job.zip" => crate::jobs::job_zip(app, ctx, env.payload).await,
+        "job.cancel" => job_cancel(app, ctx, env.payload).await,
+        #[cfg(feature = "s3")]
+        "crawl" => crate::crawl::crawl(app, ctx, env.payload, env.options).await,
+        #[cfg(feature = "s3")]
+        op @ ("site.list" | "site.pages" | "site.page" | "site.reindex") => crate::crawl::site_op(app, ctx, op, env.payload).await,
+        #[cfg(not(feature = "s3"))]
+        "crawl" | "site.list" | "site.pages" | "site.page" | "site.reindex" => Err(AppError::feature_not_compiled("s3")),
         "history.list" => crate::history::list(app, ctx, env.payload).await,
         "history.get" => crate::history::get(app, ctx, env.payload).await,
         "stats" => crate::history::stats(app, ctx, env.payload).await,
         "health" => Ok(crate::health(app, ctx).await),
         other => Err(AppError::bad_request("unknown_operation", format!("unknown operation `{other}`"))),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobId {
+    job_id: String,
+}
+
+/// `job.cancel`: stop a running crawl (pages already saved stay).
+async fn job_cancel(app: &Arc<App>, ctx: &ReqCtx, payload: Value) -> Result<Response, AppError> {
+    let p: JobId = typed(payload, "payload")?;
+    #[cfg(feature = "s3")]
+    if app.crawls.cancel(&p.job_id) {
+        return Ok(ok("job.cancel", &ctx.request_id, 202, &serde_json::json!({"job_id": p.job_id, "status": "cancelling"})));
+    }
+    let row = app.db.get_job(&p.job_id).await.map_err(crate::jobs::db_err)?;
+    let _ = (app, ctx);
+    match row {
+        None => Err(AppError::new(404, "job_not_found", "unknown job_id")),
+        Some(r) if crate::jobs::is_terminal(&r.state) => Err(AppError::new(409, "job_finished", "the job has already finished")),
+        Some(_) => Err(AppError::new(409, "not_cancellable", "only running crawls can be cancelled")),
     }
 }
 
@@ -431,6 +489,16 @@ pub enum Priority {
 }
 
 pub const MIN_CHUNK_SIZE: u32 = 128;
+pub const MAX_CRAWL_PAGES: u32 = 10_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Render {
+    Off,
+    On,
+    #[default]
+    Auto,
+}
 pub const MAX_CHUNK_SIZE: u32 = 200_000;
 
 /// Request options. Flat by design: every option is a top-level key.
@@ -448,6 +516,8 @@ pub struct Options {
     // enrichment
     pub gen_title: bool,
     pub gen_summary: bool,
+    /// Keywords, entities and questions for finding the document (in the title/summary call).
+    pub gen_search: bool,
     pub gen_chunks: bool,
     pub title_method: Method,
     pub summary_method: Method,
@@ -468,8 +538,23 @@ pub struct Options {
     // structured extraction
     /// JSON Schema (object at the top); the result's `extracted` field follows it.
     pub extract_schema: Option<Value>,
-    /// Extract embedded images (DOCX, PPTX, XLSX, ODF, EPUB, HTML) and reference them from the Markdown.
+    /// Extract embedded images (DOCX, PPTX, XLSX, ODF, EPUB, HTML, PDF) and reference them from the Markdown.
     pub extract_images: bool,
+    // web pages (needs DOCVISION_BROWSER_URL)
+    /// Run the page's JavaScript in the browser before converting: `auto` renders pages that
+    /// look empty without it.
+    pub render: Render,
+    /// With rendering: wait until this CSS selector matches, and/or this many extra milliseconds.
+    pub wait_for: Option<String>,
+    pub wait_ms: Option<u64>,
+    // crawl only (`None` = default; rejected by `convert`)
+    pub max_pages: Option<u32>,
+    pub max_depth: Option<u32>,
+    pub same_site: Option<bool>,
+    pub include: Option<Vec<String>>,
+    pub exclude: Option<Vec<String>>,
+    pub use_sitemap: Option<bool>,
+    pub respect_robots: Option<bool>,
     /// Also write a zip with the Markdown, `summary.md` (when there is a summary), any
     /// translation and the extracted images.
     pub create_zip: bool,
@@ -489,13 +574,14 @@ impl Default for Options {
             pdf_skip_local_processing: None,
             gen_title: true,
             gen_summary: true,
-            gen_chunks: true,
+            gen_search: true,
+            gen_chunks: false,
             title_method: Method::Llm,
             summary_method: Method::Llm,
             chunk_size: 512,
             chunk_overlap: None,
-            detect_language: false,
-            language_method: Method::Local,
+            detect_language: true,
+            language_method: Method::Llm,
             translate_to: None,
             words_per_page: 500,
             overwrite: true,
@@ -507,6 +593,16 @@ impl Default for Options {
             extract_images: false,
             create_zip: false,
             zip_only: false,
+            render: Render::Auto,
+            wait_for: None,
+            wait_ms: None,
+            max_pages: None,
+            max_depth: None,
+            same_site: None,
+            include: None,
+            exclude: None,
+            use_sitemap: None,
+            respect_robots: None,
         }
     }
 }
@@ -571,7 +667,36 @@ impl Options {
         {
             return bad("llm_base_url must be an http(s) URL");
         }
+        if self.wait_ms.is_some_and(|w| w > 20_000) {
+            return bad("wait_ms must be at most 20000");
+        }
+        if self.wait_for.as_ref().is_some_and(|w| w.is_empty() || w.len() > 500) {
+            return bad("wait_for must be a CSS selector of at most 500 characters");
+        }
+        if self.max_pages.is_some_and(|n| n == 0 || n > MAX_CRAWL_PAGES) {
+            return bad("max_pages must be between 1 and 10000");
+        }
+        if self.max_depth.is_some_and(|n| n > 50) {
+            return bad("max_depth must be at most 50");
+        }
+        if [&self.include, &self.exclude]
+            .iter()
+            .any(|p| p.as_ref().is_some_and(|v| v.len() > 100 || v.iter().any(|x| x.is_empty() || x.len() > 500)))
+        {
+            return bad("include and exclude take at most 100 patterns of at most 500 characters");
+        }
         Ok(())
+    }
+
+    /// Crawl options were given (they are rejected by `convert`).
+    pub fn has_crawl_options(&self) -> bool {
+        self.max_pages.is_some()
+            || self.max_depth.is_some()
+            || self.same_site.is_some()
+            || self.include.is_some()
+            || self.exclude.is_some()
+            || self.use_sitemap.is_some()
+            || self.respect_robots.is_some()
     }
 
     /// Canonical, secret-free form used for cache keys and history.
@@ -604,6 +729,9 @@ pub struct WebhookSpec {
     /// One attempt, no retries; any HTTP response marks the delivery `sent`.
     #[serde(default)]
     pub fire_and_forget: bool,
+    /// Extra events besides `job.finished`: `page.finished` (crawl, one per page).
+    #[serde(default)]
+    pub events: Vec<String>,
 }
 
 /// `payload.webhook`: one webhook object or an array of them.
@@ -634,6 +762,12 @@ pub struct ConvertPayload {
     /// Who sent the request (a name or ID), for filtering history. Default `unknown`.
     #[serde(default)]
     pub requester_id: Option<String>,
+    /// Headers, query parameters and cookies for fetching an HTTP(S) source (secret).
+    #[serde(default)]
+    pub request: Option<crate::source::FetchRequest>,
+    /// `crawl`: the site name in the crawl store (default: the start URL's host).
+    #[serde(default)]
+    pub site: Option<String>,
 }
 
 /// Normalized `requester_id`: trimmed, `unknown` when absent, at most 128 printable characters.
