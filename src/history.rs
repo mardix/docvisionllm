@@ -98,6 +98,8 @@ fn item(r: &sqlx::any::AnyRow) -> Value {
         "dest_file": files.get("dest_file"),
         "output_file": files.get("output_file"),
         "output_bytes": files.get("output_bytes"),
+        "md_file": files.get("md_file"),
+        "md_bytes": files.get("md_bytes"),
         "zip_file": files.get("zip_file"),
         "zip_bytes": files.get("zip_bytes"),
         "request_status": s("request_status"),

@@ -167,6 +167,14 @@ fn cached_images_present(app: &App, raw: &Arc<Vec<u8>>) -> bool {
     })
 }
 
+/// The converted Markdown.
+pub fn content_of(body: &BodyRef) -> String {
+    match body {
+        BodyRef::Owned(b) => b.content.clone(),
+        raw => raw.fields(&["content"]).remove("content").and_then(|c| c.as_str().map(str::to_string)).unwrap_or_default(),
+    }
+}
+
 /// Length of the converted Markdown (`None` when there is no converted body).
 fn content_len(body: Option<&BodyRef>) -> Option<u64> {
     match body? {
@@ -235,10 +243,11 @@ async fn write_zip_from(
     app: &App,
     out: PathBuf,
     name: String,
+    markdown: String,
     result: PathBuf,
     images: Vec<(PathBuf, String)>,
 ) -> Result<(PathBuf, u64), AppError> {
-    let r = app.cpu.run(move || result::write_zip(&out, &name, &result, &images).map(|n| (out, n))).await.map_err(cpu_err)?;
+    let r = app.cpu.run(move || result::write_zip(&out, &name, &markdown, &result, &images).map(|n| (out, n))).await.map_err(cpu_err)?;
     r.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             AppError::new(410, "images_expired", "an extracted image is no longer stored; convert the document again").stage("storage")
@@ -689,6 +698,8 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
         src_bytes,
         dest_file: None,
         output_file: None,
+        md_file: None,
+        md_bytes: content_len(body.as_ref()),
         images_dir: None,
         zip_file: None,
         zip_bytes: 0,
@@ -719,7 +730,10 @@ async fn run_sync(app: &Arc<App>, ctx: &ReqCtx, spec: Arc<JobSpec>, src: Source)
             http_status: Some(http as i64),
             finished_at: now_ms(),
             timings: serde_json::to_string(&timing).ok(),
-            statistics: stats_with_format(&stats, serde_json::json!({"src_bytes": src_bytes, "cache_hit": cache_hit})),
+            statistics: stats_with_format(
+                &stats,
+                serde_json::json!({"src_bytes": src_bytes, "md_bytes": content_len(body.as_ref()), "cache_hit": cache_hit}),
+            ),
             format: stats.get("format").and_then(Value::as_str).map(str::to_string),
             usage: serde_json::to_string(&llm.totals).ok(),
             warnings: stats.get("warnings").map(Value::to_string),
@@ -1138,6 +1152,7 @@ async fn finalize_async(
     let image_files = body.as_ref().map(|b| image_files(app, &image_metas(b))).unwrap_or_default();
     let zip_only = spec.options.zip_only && dest.is_some();
     let output_shown = dest.as_ref().filter(|_| !zip_only).map(|d| d.display());
+    let md_shown = dest.as_ref().filter(|_| !zip_only).map(|d| d.md_display());
     let images_shown = dest.as_ref().filter(|_| !image_files.is_empty() && !zip_only).map(|d| d.images_display());
     let zip_shown = zip_location(app, &job_id, dest.as_ref()).1;
     let llm = if cache_hit { LlmSection::default() } else { acct.section() };
@@ -1156,7 +1171,7 @@ async fn finalize_async(
             timing.stages.storage_ms = t_store.elapsed().as_millis() as u64;
         }
         let dest_s = spec.payload.destination.as_deref().map(source::sanitize);
-        let (out_s, images_s, zip_s) = (output_shown.clone(), images_shown.clone(), zip_shown.clone());
+        let (out_s, md_s, images_s, zip_s) = (output_shown.clone(), md_shown.clone(), images_shown.clone(), zip_shown.clone());
         let (hash, fetched, converted) = (content_hash.clone(), fetched_s.clone(), converted_s.clone());
         let eb = err.map(|e| e.body());
         let cpu = app2.cpu.clone();
@@ -1174,6 +1189,8 @@ async fn finalize_async(
                         src_bytes,
                         dest_file: dest_s.as_deref(),
                         output_file: out_s.as_deref().filter(|_| published),
+                        md_file: md_s.as_deref().filter(|_| published),
+                        md_bytes: content_len,
                         images_dir: images_s.as_deref().filter(|_| published),
                         zip_file: zip_s.as_deref(),
                         zip_bytes,
@@ -1200,12 +1217,15 @@ async fn finalize_async(
 
     // The published `.jsonl` is byte-identical to the local result file.
     let publishing = dest.is_some() && err.is_none();
+    let markdown = if err.is_none() && (publishing || spec.options.wants_zip()) { content_of(&body_ref) } else { String::new() };
     let mut written = write(status, publishing, 0, err.as_ref()).await;
     // The zip holds the result as written; the result is then rewritten with the zip's size.
     let mut zip_built: Option<(PathBuf, u64)> = None;
     if err.is_none() && written.is_ok() && spec.options.wants_zip() {
         let name = result::zip_name(dest.as_ref(), &spec.payload.source);
-        match write_zip_from(app, zip_location(app, &job_id, dest.as_ref()).0, name, path.clone(), image_files.clone()).await {
+        match write_zip_from(app, zip_location(app, &job_id, dest.as_ref()).0, name, markdown.clone(), path.clone(), image_files.clone())
+            .await
+        {
             Ok(z) => {
                 written = write(status, publishing, z.1, None).await;
                 zip_built = Some(z);
@@ -1221,7 +1241,8 @@ async fn finalize_async(
     if let (Ok(_), Some(d)) = (&written, &dest)
         && err.is_none()
         && let Err(e) =
-            result::publish(d, &path, spec.options.overwrite, &image_files, zip_built.as_ref().map(|z| z.0.as_path()), zip_only).await
+            result::publish(d, &path, &markdown, spec.options.overwrite, &image_files, zip_built.as_ref().map(|z| z.0.as_path()), zip_only)
+                .await
     {
         // Never claim a destination was written when storage failed.
         status = "failed";
@@ -1268,6 +1289,8 @@ async fn finalize_async(
         "dest_file": spec.payload.destination.as_deref().map(source::sanitize),
         "output_file": published.and(output_shown.as_ref()),
         "output_bytes": published.and(output_shown.as_ref()).map(|_| size),
+        "md_file": published.and(md_shown.as_ref()),
+        "md_bytes": content_len,
         "zip_file": zip_shown,
         "zip_bytes": zip_size,
     });
@@ -1564,13 +1587,15 @@ async fn make_zip(app: Arc<App>, row: JobRow, stored: StoredJob, dest: Option<re
         let p2 = path.clone();
         let mut m = app
             .cpu
-            .run(move || select_fields(&p2, &["images".to_string()]))
+            .run(move || select_fields(&p2, &["images".to_string(), "content".to_string()]))
             .await
             .map_err(cpu_err)?
             .map_err(|_| AppError::new(410, "expired", "the job's result is no longer stored"))?;
         let metas: Vec<result::ImageMeta> = m.remove("images").and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
         let name = result::zip_name(dest.as_ref(), &stored.payload.source);
-        let (zp, n) = write_zip_from(&app, zip_location(&app, &row.job_id, dest.as_ref()).0, name, path, image_files(&app, &metas)).await?;
+        let markdown = m.remove("content").and_then(|c| c.as_str().map(str::to_string)).unwrap_or_default();
+        let (zp, n) =
+            write_zip_from(&app, zip_location(&app, &row.job_id, dest.as_ref()).0, name, markdown, path, image_files(&app, &metas)).await?;
         if let Some(d) = &dest {
             let r = result::publish_zip(d, &zp, true).await;
             let _ = tokio::fs::remove_file(&zp).await;

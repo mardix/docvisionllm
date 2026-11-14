@@ -52,9 +52,10 @@ async fn create_zip_next_to_the_output() {
     assert_eq!((&inner["content"], &inner["summary"]), (&r["content"], &r["summary"]), "the same result");
     assert_eq!(inner["zip_bytes"], 0, "the copy inside the zip was written before the zip existed");
     assert_eq!(e[image], fixtures::picture(640, 480, 1));
-    assert_eq!(e.len(), 2, "{:?}", e.keys());
+    assert_eq!(e["report.docx.md"], r["content"].as_str().unwrap().as_bytes(), "the Markdown");
+    assert_eq!(e.len(), 3, "{:?}", e.keys());
     // The usual files are still written.
-    assert!(out.join("report.docx.jsonl").exists() && out.join(image).exists());
+    assert!(out.join("report.docx.jsonl").exists() && out.join("report.docx.md").exists() && out.join(image).exists());
 }
 
 #[tokio::test]
@@ -69,10 +70,13 @@ async fn zip_only_writes_just_the_zip_and_the_result() {
     let j = s.wait_job(v["data"]["job_id"].as_str().unwrap()).await;
     assert_eq!(j["status"], "completed", "{j}");
     let r = &j["result"];
-    assert!(!out.join("report.docx.jsonl").exists() && !out.join("images").exists(), "only the zip");
-    assert!(r["output_file"].is_null() && r["images_dir"].is_null(), "not written: {r}");
+    assert!(
+        !out.join("report.docx.jsonl").exists() && !out.join("report.docx.md").exists() && !out.join("images").exists(),
+        "only the zip"
+    );
+    assert!(r["output_file"].is_null() && r["md_file"].is_null() && r["images_dir"].is_null(), "not written: {r}");
     let e = entries(&std::fs::read(out.join("report.docx.zip")).unwrap());
-    assert!(e.contains_key("report.docx.jsonl"), "{:?}", e.keys());
+    assert!(e.contains_key("report.docx.jsonl") && e.contains_key("report.docx.md"), "{:?}", e.keys());
     assert_eq!(e.keys().filter(|k| k.starts_with("images/")).count(), 1);
 }
 
@@ -111,7 +115,11 @@ async fn job_zip_builds_it_later() {
     let bytes = r.bytes().await.unwrap();
     assert_eq!(info["zip_bytes"].as_u64(), Some(bytes.len() as u64));
     let e = entries(&bytes);
-    assert!(e.contains_key("report.docx.jsonl") && e.keys().any(|k| k.starts_with("images/")), "{:?}", e.keys());
+    assert!(
+        e.contains_key("report.docx.jsonl") && e.contains_key("report.docx.md") && e.keys().any(|k| k.starts_with("images/")),
+        "{:?}",
+        e.keys()
+    );
     // Asking again reports the zip that exists.
     let (st, v) = s.rpc("job.zip", json!({"job_id": job_id}), json!({})).await;
     assert_eq!((st, &v["data"]["zip_bytes"]), (200, &info["zip_bytes"]), "{v}");

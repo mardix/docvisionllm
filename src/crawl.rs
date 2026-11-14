@@ -743,6 +743,9 @@ async fn save(
                 .map_err(|_| AppError::internal("cannot read an extracted image"))?;
             cx.store.put(&format!("sites/{}/images/{}", cx.site, m.file_name()), data).await?;
         }
+        if let Some(b) = &body {
+            cx.store.put(&format!("sites/{}/pages/{key}.md", cx.site), jobs::content_of(b).into_bytes()).await?;
+        }
         cx.store.put(&page_rel(&cx.site, &key), row.clone()).await
     }
     .await;

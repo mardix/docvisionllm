@@ -121,6 +121,11 @@ async fn crawls_a_site_into_jsonl() {
     assert!(a.get("chunks").is_some() && a.get("search").is_some(), "every row has the same keys");
     assert!(!String::from_utf8_lossy(&site_file).contains("t1") && !String::from_utf8_lossy(&site_file).contains("secret"));
     assert!(store.join("sites/127.0.0.1/pages/a.jsonl").exists() && store.join("sites/127.0.0.1/pages/_root.jsonl").exists());
+    assert_eq!(
+        std::fs::read_to_string(store.join("sites/127.0.0.1/pages/a.md")).unwrap(),
+        a["content"].as_str().unwrap(),
+        "each page's Markdown"
+    );
     let run_file = std::fs::read(store.join(format!("sites/127.0.0.1/runs/{job_id}/pages.jsonl"))).unwrap();
     assert_eq!(lines(&run_file).len(), 4);
     assert!(r["site_pages_file"].as_str().unwrap().ends_with("/sites/127.0.0.1/pages.jsonl"), "{r}");

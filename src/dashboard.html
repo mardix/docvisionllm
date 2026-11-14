@@ -968,6 +968,7 @@
           ] : [
             el("dt", {}, "Destination"), el("dd", {}, q.dest_file || "—"),
             el("dt", {}, "Output file"), el("dd", {}, fileLine(q.output_file, q.output_bytes)),
+            el("dt", {}, "Markdown file"), el("dd", {}, fileLine(q.md_file, q.md_bytes)),
             el("dt", {}, "Zip"), el("dd", {}, q.zip_file && q.zip_bytes > 0 ? fileLine(q.zip_file, q.zip_bytes) : "—"),
             el("dt", {}, "Format"), el("dd", {}, q.format || st.format || "—"),
             el("dt", {}, "Cache"), el("dd", {}, q.cache_hit ? "Served from cache (no extraction, no LLM calls)" : q.cache_hit === false ? "Not cached: converted for this request" : "—"),
@@ -1209,6 +1210,7 @@
     const parts = [head];
     const files = el("dl", { class: "files" });
     if (data.output_file) files.append(el("dt", {}, "Output file"), el("dd", {}, data.output_file));
+    if (data.md_file) files.append(el("dt", {}, "Markdown file"), el("dd", {}, fileLine(data.md_file, data.md_bytes)));
     if (data.images_dir) files.append(el("dt", {}, "Images"), el("dd", {}, data.images_dir));
     if (data.zip_file && data.zip_bytes > 0) {
       const dd = el("dd", {}, fileLine(data.zip_file, data.zip_bytes));

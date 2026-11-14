@@ -190,7 +190,7 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
 - **They are secrets:** stored encrypted with the job, never written to results, history, logs or webhooks, and `query` values are removed from the URLs results show.
 - At most 64 entries and 8 KiB in total. `Host`, `Content-Length`, `Connection` and `x-docvision-*` are not allowed. Only for `http(s)` sources.
 
-**Destination:** the result is written as JSON Lines: one line, the same record the API returns, with the Markdown in `content`. No `.md` file is written.
+**Destination:** two files are written: the result as JSON Lines (one line, the same record the API returns, with the Markdown in `content`), and the Markdown on its own as `.md`.
 
 - **A folder** (ending in `/`): the file is named after the source file, keeping its extension, so documents with the same name but different formats never collide.
 
@@ -198,10 +198,11 @@ On failure, `ok` is `false` and the error looks like `{"code": "…", "message":
   "destination": "s3://bucket/out/"        source: …/hello.pdf
 
   s3://bucket/out/hello.pdf.jsonl          ← the result
+  s3://bucket/out/hello.pdf.md             ← the Markdown
   s3://bucket/out/images/…                 ← extracted images (extract_images)
   ```
 
-- **A `.jsonl` file:** the result goes there.
+- **A `.jsonl` file:** the result goes there, and the Markdown next to it (`/out/report.jsonl` → `/out/report.md`).
 
 Existing files are replaced. Set `overwrite: false` to keep them instead; the job then fails with `409 destination_exists`.
 
@@ -232,8 +233,8 @@ All options are optional, and all are top-level keys in `options`.
 | `cache` | `use` | `use`, `bypass`, `refresh` |
 | `allow_partial` | `false` | Accept partial extraction (`status: "partial"`) |
 | `overwrite` | `true` | Replace existing destination files. `false` fails the job with `409 destination_exists` instead |
-| `create_zip` | `false` | Also write a zip with the result (`.jsonl`) and the images. Async only. See [Zip](#zip) |
-| `zip_only` | `false` | Write only the zip to the destination, not the `.jsonl` and `images/`. Turns on `create_zip` |
+| `create_zip` | `false` | Also write a zip with the Markdown, the result (`.jsonl`) and the images. Async only. See [Zip](#zip) |
+| `zip_only` | `false` | Write only the zip to the destination, not the `.jsonl`, `.md` and `images/`. Turns on `create_zip` |
 
 **PDF and images**
 
@@ -359,6 +360,8 @@ A result is one JSON Lines record: the API returns it, and a destination gets it
   "src_bytes": 4821337,
   "dest_file": "s3://bucket/out/",
   "output_file": "s3://bucket/out/report.pdf.jsonl",
+  "md_file": "s3://bucket/out/report.pdf.md",
+  "md_bytes": 24655,
   "images_dir": "s3://bucket/out/images/",
   "zip_file": "s3://bucket/out/report.pdf.zip",
   "zip_bytes": 0,
@@ -434,6 +437,8 @@ A result is one JSON Lines record: the API returns it, and a destination gets it
   | `src_file`, `src_bytes` | The source document and its size | `src_bytes`: the source couldn't be fetched or converted |
   | `dest_file` | The destination as you requested it (a folder or a `.jsonl` location) | no destination (always for sync) |
   | `output_file` | Where this result was written | no destination, `zip_only`, or writing failed |
+  | `md_file` | Where the Markdown was written | no destination, `zip_only`, or writing failed |
+  | `md_bytes` | Size of the Markdown (the `content` field) | the conversion failed |
   | `images_dir` | Where extracted images were written | no destination, no images, or `zip_only` |
   | `zip_file`, `zip_bytes` | Where the zip is, or will be once `job.zip` builds it. `zip_bytes` is `0` until it exists | `zip_file`: sync conversions (`zip_bytes` is then `0`) |
 
@@ -494,17 +499,18 @@ Revenue grew 12% this quarter.
 
 ### Zip
 
-A zip holds the result and its images in one file:
+A zip holds the Markdown, the result and its images in one file:
 
 ```
 report.pdf.zip
-├── report.pdf.jsonl      the result (the Markdown is its content)
+├── report.pdf.md         the Markdown
+├── report.pdf.jsonl      the result
 └── images/…              the extracted images (extract_images)
 ```
 
 Files are stored without compression (pictures barely shrink), so the zip is quick to build. The result inside was written just before the zip, so it shows `zip_bytes: 0`.
 
-**When converting:** `"create_zip": true` (async jobs). The zip is written next to the result (`report.pdf.zip`), or, without a destination, kept with the job and downloaded with `GET /_/jobs/{job_id}/zip`. Add `"zip_only": true` to write only the zip, without the separate `.jsonl` and `images/`.
+**When converting:** `"create_zip": true` (async jobs). The zip is written next to the result (`report.pdf.zip`), or, without a destination, kept with the job and downloaded with `GET /_/jobs/{job_id}/zip`. Add `"zip_only": true` to write only the zip, without the separate `.jsonl`, `.md` and `images/`.
 
 **Later:** every async result carries `zip_file` (where the zip is or will be) and `zip_bytes` (`0` until it exists). To make it afterwards:
 
@@ -577,6 +583,7 @@ Replies `202` with `{"status": "running", "job_id": …, "site": …}`.
 ```
 sites/<site>/pages.jsonl                 the site now: the latest row of every page (gone pages left out)
 sites/<site>/pages/<path>.jsonl          each page's row
+sites/<site>/pages/<path>.md             each page's Markdown
 sites/<site>/images/<file>               extracted images (rows link to them as images/<file>)
 sites/<site>/runs/<job_id>/pages.jsonl   the rows one run produced
 ```
@@ -833,7 +840,7 @@ Waits for a state change (30 s at most). Returns the same data as `job.get` with
 - `in_progress: true` returns only requests that are `queued` or `running`.
 - `format` filters by detected document format (`pdf`, `docx`, `xlsx`, `pptx`, `html`, `markdown`, `text`, `png`, `jpeg`, `webp`, …).
 - Each item includes `requester_id`, `format`, `llm_provider` and `llm_model` (`null` when no LLM was used), status, timings, statistics and token usage.
-- Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `zip_file` and `zip_bytes`. They stay in history after the result itself has expired.
+- Each item also carries the file fields of the result: `source`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `md_file`, `md_bytes`, `zip_file` and `zip_bytes`. They stay in history after the result itself has expired.
 - `cache_hit` says whether the request was served from the result cache.
 - Returns `{"items": [...], "has_more": true, "next_cursor": "…"}`.
 - Pass `next_cursor` back as `cursor` to get the next page.
@@ -933,7 +940,7 @@ Called after an async job finishes (`webhooks` feature). `payload.webhook` is on
 | `"$$text"` | The literal string `"$text"` |
 | anything else | Sent unchanged |
 
-Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `operation`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `images_dir`, `zip_file`, `zip_bytes`; for a crawl `site`, `pages`, `pages_file`, `site_pages_file`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
+Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_id`, `operation`, `status`, the file fields (`src_file`, `src_bytes`, `dest_file`, `output_file`, `output_bytes`, `md_file`, `md_bytes`, `images_dir`, `zip_file`, `zip_bytes`; for a crawl `site`, `pages`, `pages_file`, `site_pages_file`), `metadata`, `statistics`, `llm` (totals), `timing` and `error`. It never includes the content, so the receiver can use the paths and sizes to decide what to fetch.
 
 **Page events** (crawls, with `"events": ["page.finished"]`): one `page.finished` event per saved page, with `event_id`, `event`, `job_id`, `request_id` and the page's row (including its `content`), signed and retried like `job.finished`. A receiver can index pages as they arrive instead of waiting for the run to end.
 
@@ -976,7 +983,7 @@ Without `body`, a short event is sent: `event_id`, `event`, `job_id`, `request_i
 The access token grants full use of the service, so treat it like a password and give it only to trusted callers. With it, a caller can:
 
 - **Read local files** the service can read (by absolute path). `/proc`, `/sys` and `/dev` are always refused, after symlinks are resolved, so the process environment and its secrets can't be read. In Docker the service sees only its image and what you mount; mount document folders read-only.
-- **Write destinations** (`.jsonl` files and `images/`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
+- **Write destinations** (`.jsonl` and `.md` files and `images/`) anywhere the service can write, replacing existing files of those names unless `overwrite: false`. In Docker, that's `/data` and any writable mounts.
 - **Fetch URLs** over `https://` (and `http://` on localhost only), including hosts on your internal network. Webhooks follow the same rule. Run the service where it can only reach what it should.
 - **Render pages and crawl sites** through the browser container. A page's own requests can reach whatever the browser container can reach; link-local and cloud-metadata addresses (`169.254.x.x`, `metadata.google.internal`) are refused, but other internal addresses are not, so give the browser container only the network access it needs. Crawls respect `robots.txt` by default; fetching other people's sites is subject to their terms.
 

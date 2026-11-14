@@ -330,11 +330,15 @@ async fn destinations_local_jsonl() {
     assert_eq!(j["status"], "completed", "{j}");
     let bytes = std::fs::read(&dest).unwrap();
     assert!(bytes.ends_with(b"}\n") && bytes.iter().filter(|b| **b == b'\n').count() == 1, "one JSON Lines record");
-    assert!(!out.join("report.md").exists() && !out.join("report.docv.json").exists(), "no .md or .docv.json any more");
+    assert!(!out.join("report.docv.json").exists(), "no .docv.json any more");
     let line: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!((line["operation"].as_str(), line["job_id"].as_str()), (Some("convert"), Some(job_id.as_str())));
     assert_eq!(line["output_file"], dest.to_str().unwrap());
     assert!(line["content"].as_str().unwrap().contains("Quarterly"), "the Markdown is the content field");
+    // The Markdown is also written next to it.
+    assert_eq!(std::fs::read_to_string(out.join("report.md")).unwrap(), line["content"].as_str().unwrap());
+    assert_eq!(line["md_file"], out.join("report.md").to_str().unwrap());
+    assert_eq!(line["md_bytes"].as_u64(), Some(line["content"].as_str().unwrap().len() as u64));
     assert!(line.get("output_bytes").is_none(), "a file does not contain its own size");
     assert_eq!(line["src_bytes"].as_u64().unwrap(), std::fs::metadata(&p).unwrap().len());
     assert!(line["converted_at"].is_string() && line["content_hash"].as_str().unwrap().starts_with("b3:"));

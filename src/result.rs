@@ -50,6 +50,10 @@ pub struct Header<'a> {
     pub dest_file: Option<&'a str>,
     /// Where this result was written as JSON Lines (`null` without a destination).
     pub output_file: Option<&'a str>,
+    /// Where the Markdown was written (`null` without a destination), and its size (set for
+    /// every converted document).
+    pub md_file: Option<&'a str>,
+    pub md_bytes: Option<u64>,
     /// Where extracted images were written (`null` without a destination or without images).
     pub images_dir: Option<&'a str>,
     /// Where the zip is (or will be, via `job.zip`) for an async job; `zip_bytes` is 0 until it
@@ -409,16 +413,23 @@ pub fn zip_sibling(out: &str) -> String {
     format!("{}.zip", out.strip_suffix(".jsonl").unwrap_or(out))
 }
 
-/// Write a zip of the result (`<name>.jsonl`) and its images (`images/…`) atomically and
-/// return its size. Entries are stored without compression (pictures barely shrink); files are
-/// copied from disk, never held in memory. Blocking: call on the CPU lane.
-pub fn write_zip(path: &Path, name: &str, result: &Path, images: &[(PathBuf, String)]) -> io::Result<u64> {
+/// `report.jsonl` -> `report.md`: where the Markdown is written.
+pub fn md_sibling(out: &str) -> String {
+    format!("{}.md", out.strip_suffix(".jsonl").unwrap_or(out))
+}
+
+/// Write a zip of the Markdown (`<name>.md`), the result (`<name>.jsonl`) and its images
+/// (`images/…`) atomically and return its size. Entries are stored without compression
+/// (pictures barely shrink); files are copied from disk. Blocking: call on the CPU lane.
+pub fn write_zip(path: &Path, name: &str, markdown: &str, result: &Path, images: &[(PathBuf, String)]) -> io::Result<u64> {
     use zip::write::SimpleFileOptions;
     let tmp = path.with_extension(format!("zip-{}.tmp", uuid::Uuid::now_v7()));
     let res = (|| {
         let f = std::fs::File::create(&tmp)?;
         let mut z = zip::ZipWriter::new(io::BufWriter::with_capacity(64 * 1024, f));
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored).large_file(true);
+        z.start_file(format!("{name}.md"), opts).map_err(io::Error::other)?;
+        z.write_all(markdown.as_bytes())?;
         let entries = std::iter::once((result.to_path_buf(), format!("{name}.jsonl")))
             .chain(images.iter().map(|(src, file)| (src.clone(), format!("images/{file}"))));
         for (src, entry) in entries {
@@ -484,6 +495,9 @@ impl Dest {
     }
     pub fn zip_display(&self) -> String {
         self.sibling(zip_sibling)
+    }
+    pub fn md_display(&self) -> String {
+        self.sibling(md_sibling)
     }
 }
 
@@ -561,7 +575,7 @@ async fn s3_put(loc: &crate::source::S3Loc, key: &str, data: bytes::Bytes, overw
     }
 }
 
-/// Publish the result (`.jsonl`) and its images (`images/` next to it) to the destination,
+/// Publish the result (`.jsonl`), the Markdown (`.md`) and the images (`images/`) to the destination,
 /// plus a built zip (`<name>.zip`). With `zip_only`, only the zip is written. Everything is
 /// written before the caller marks completion; any failure is returned, never hidden.
 /// `images`: (stored path, file name); named by content hash, so an existing file is already
@@ -569,6 +583,7 @@ async fn s3_put(loc: &crate::source::S3Loc, key: &str, data: bytes::Bytes, overw
 pub async fn publish(
     dest: &Dest,
     result_file: &Path,
+    markdown: &str,
     overwrite: bool,
     images: &[(PathBuf, String)],
     zip: Option<&Path>,
@@ -582,9 +597,10 @@ pub async fn publish(
     }
     match dest {
         Dest::Local(p) => {
-            let (p, src, images) = (p.clone(), result_file.to_path_buf(), images.to_vec());
+            let (p, src, md, images) = (p.clone(), result_file.to_path_buf(), markdown.as_bytes().to_vec(), images.to_vec());
             tokio::task::spawn_blocking(move || {
                 local_put(Some(&src), None, &p, overwrite)?;
+                local_put(None, Some(&md), Path::new(&md_sibling(&p.display().to_string())), overwrite)?;
                 if !images.is_empty() {
                     let io = |e: io::Error| {
                         AppError::new(502, "destination_write_failed", format!("cannot write images: {}", e.kind())).stage("storage")
@@ -607,6 +623,7 @@ pub async fn publish(
         Dest::S3(loc, shown) => {
             let data = tokio::fs::read(result_file).await.map_err(|_| AppError::internal("cannot read result file"))?;
             s3_put(loc, &loc.key, data.into(), overwrite, shown).await?;
+            s3_put(loc, &md_sibling(&loc.key), bytes::Bytes::copy_from_slice(markdown.as_bytes()), overwrite, &dest.md_display()).await?;
             let prefix = loc.key.rsplit_once('/').map(|(d, _)| format!("{d}/images/")).unwrap_or_else(|| "images/".into());
             for (src, name) in images {
                 let data = tokio::fs::read(src).await.map_err(|_| AppError::internal("cannot read extracted image"))?;
@@ -659,6 +676,8 @@ mod tests {
             src_bytes: Some(4),
             dest_file: None,
             output_file: None,
+            md_file: None,
+            md_bytes: None,
             images_dir: None,
             zip_file: None,
             zip_bytes: 0,
@@ -695,7 +714,7 @@ mod tests {
 
     #[test]
     fn destinations() {
-        assert_eq!(zip_sibling("/x/a.jsonl"), "/x/a.zip");
+        assert_eq!((zip_sibling("/x/a.jsonl"), md_sibling("/x/a.jsonl")), ("/x/a.zip".into(), "/x/a.md".into()));
         assert!(parse_dest("/x/a.md", "/in/x.pdf").is_err());
         assert!(parse_dest("/x/a.json", "/in/x.pdf").is_err());
         // Folders: the output is named after the source file, extension kept.

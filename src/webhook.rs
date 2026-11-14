@@ -233,7 +233,7 @@ async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &W
     let p = path.to_path_buf();
     let Some(template) = &spec.body else {
         // A short event: what happened and where things are, never the content.
-        const FIELDS: [&str; 17] = [
+        const FIELDS: [&str; 19] = [
             "operation",
             "status",
             "site",
@@ -241,6 +241,8 @@ async fn body_for(app: &App, eid: &str, job_id: &str, request_id: &str, spec: &W
             "src_bytes",
             "dest_file",
             "output_file",
+            "md_file",
+            "md_bytes",
             "images_dir",
             "zip_file",
             "zip_bytes",
